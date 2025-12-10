@@ -119,6 +119,17 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
 
         fetchMessages();
 
+        // MARK AS READ: When I open the chat, mark all messages FROM THE RECIPIENT as read
+        const markAsRead = async () => {
+            await supabase
+                .from('messages')
+                .update({ is_read: true })
+                .eq('sender_id', recipientId)
+                .eq('recipient_id', currentUser.id)
+                .eq('is_read', false);
+        };
+        markAsRead();
+
         // Subscribe to messages
         const messageChannel = supabase
             .channel(`chat_messages:${currentUser.id}-${recipientId}`)
@@ -140,6 +151,11 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                         (payload.new.sender_id === currentUser.id && payload.new.recipient_id === recipientId);
 
                     if (isRelevant) {
+                        // IF I receive a new message while in the chat, mark it as read immediately
+                        if (payload.new.sender_id === recipientId && payload.new.recipient_id === currentUser.id) {
+                            supabase.from('messages').update({ is_read: true }).eq('id', payload.new.id).then();
+                        }
+
                         setMessages(prev => {
                             // If it's my own message (or impersonated), verify if we have an optimistic version to replace
                             if (payload.new.sender_id === currentUser.id) {
