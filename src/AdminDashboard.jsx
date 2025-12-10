@@ -14,6 +14,8 @@ export default function AdminDashboard() {
         const checkAdmin = async () => {
             const { data: { user } } = await supabase.auth.getUser();
             if (!user) {
+                console.warn("No active session found. Redirecting to login.");
+                alert("You must be logged in to access Admin Panel.");
                 navigate('/login');
                 return;
             }
