@@ -19,14 +19,21 @@ export default function AdminDashboard() {
             }
 
             // Check if admin
-            const { data: profile } = await supabase
+            const { data: profile, error } = await supabase
                 .from('profiles')
                 .select('is_admin')
                 .eq('id', user.id)
                 .single();
 
+            if (error) {
+                console.error("Admin Check Error:", error);
+                alert(`Error checking admin status: ${error.message} (Hint: Did you run FIX_500_ERROR.sql?)`);
+                navigate('/dashboard');
+                return;
+            }
+
             if (!profile || !profile.is_admin) {
-                alert("Access Denied: Admins Only");
+                alert("Access Denied: You are not marked as an Admin in the database.");
                 navigate('/dashboard');
                 return;
             }
