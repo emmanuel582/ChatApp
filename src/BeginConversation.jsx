@@ -77,11 +77,13 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
                 return;
             }
 
-            // Filter out Ghost Messages if I am NOT the ghost (Real Owner viewing inbox)
+            // Filter out Ghost Messages and Hidden Messages if I am NOT the ghost (Real Owner viewing inbox)
             const filteredMessages = messages.filter(msg => {
                 if (isGhostMode) return true; // Admin sees everything
                 // Real user: hide messages SENT BY ME that are flagged as admin_message
                 if (msg.sender_id === currentUser.id && msg.is_admin_message) return false;
+                // Real user: hide messages marked as hidden from owner (intercepted during admin session)
+                if (msg.is_hidden_from_owner) return false;
                 return true;
             });
 
