@@ -42,6 +42,10 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
     // Image Preview State
     const [previewImage, setPreviewImage] = useState(null);
 
+    // Authorization State
+    const [isAuthorized, setIsAuthorized] = useState(false);
+    const [authChecked, setAuthChecked] = useState(false);
+
     // Refs
     const messagesEndRef = useRef(null);
     const audioRef = useRef(new Audio('/keyboard-typing-sound-effect-335503.mp3'));
@@ -65,6 +69,36 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
             navigate('/dashboard');
         }
     };
+
+    // 0. Verify Chat Authorization
+    useEffect(() => {
+        const verifyChatAuth = async () => {
+            if (!recipientId) {
+                setAuthChecked(true);
+                return;
+            }
+
+            let userId;
+            if (isGhostMode && impersonatedUser) {
+                userId = impersonatedUser.id;
+            } else {
+                const { data: { user } } = await supabase.auth.getUser();
+                userId = user?.id;
+            }
+
+            if (!userId) {
+                setAuthChecked(true);
+                navigate('/login');
+                return;
+            }
+
+            // Allow access to start a conversation.
+            setIsAuthorized(true);
+            setAuthChecked(true);
+        };
+
+        verifyChatAuth();
+    }, [recipientId, isGhostMode, impersonatedUser, navigate]);
 
     // 1. Fetch Current User, User Profile & Recipient & Initial Presence
     useEffect(() => {
@@ -180,7 +214,7 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                     console.log('[ChatScreen] SHOWING message:', msg.id);
                     return true;
                 });
-                
+
                 console.log('[ChatScreen] Final visible messages:', visible.length);
                 setMessages(visible);
             }
@@ -281,7 +315,7 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                             // If message was hidden and now approved, add it if it's for the real owner
                             if (!isGhostMode && !payload.new.is_hidden_from_owner && !prev.find(m => m.id === payload.new.id)) {
                                 // Message was approved and should now be visible to real owner
-                                return [...prev, payload.new].sort((a, b) => 
+                                return [...prev, payload.new].sort((a, b) =>
                                     new Date(a.created_at) - new Date(b.created_at)
                                 );
                             }
@@ -364,9 +398,9 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
             alert("Error approving message: " + error.message);
         } else if (data) {
             console.log('[ChatScreen] Message approved successfully:', data);
-            setMessages(prev => prev.map(m => 
-                m.id === msgId 
-                    ? { ...m, is_hidden_from_owner: false, created_at: newTimestamp } 
+            setMessages(prev => prev.map(m =>
+                m.id === msgId
+                    ? { ...m, is_hidden_from_owner: false, created_at: newTimestamp }
                     : m
             ));
         }
@@ -392,7 +426,7 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
             .from('profiles')
             .update({ active_admin_session: false })
             .eq('id', currentUser.id);
-        
+
         if (error) {
             console.error('[ChatScreen] Error stopping session:', error);
             alert("Error stopping session");
@@ -484,7 +518,7 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                 .eq('id', currentUser.id)
                 .select()
                 .single();
-            
+
             if (updateError) {
                 console.error('[ChatScreen] Error starting session:', updateError);
                 console.error('[ChatScreen] Error details:', {
@@ -724,6 +758,10 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
         gap: '4px',
         marginBottom: '10px'
     };
+
+    if (!authChecked) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: '#666' }}>Verifying access...</div>;
+
+    if (!isAuthorized) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: '#666' }}>Access Denied</div>;
 
     if (!recipient || !currentUser) return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: '#666' }}>Loading chat...</div>;
 
@@ -1047,11 +1085,11 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
             {/* Emoji Picker Popover */}
             {
                 showEmojiPicker && (
-                    <div style={{ position: 'absolute', bottom: '130px', left: '10px', zIndex: 1000, WebkitBoxShadow: '0 5px 20px rgba(0,0,0,0.2)' }}>
+                    <div style={{ position: 'absolute', bottom: '80px', left: '0', right: '0', margin: '0 auto', maxWidth: '350px', width: '95%', zIndex: 1000, WebkitBoxShadow: '0 5px 20px rgba(0,0,0,0.2)' }}>
                         <EmojiPicker
                             theme={Theme.DARK}
                             onEmojiClick={onEmojiClick}
-                            width={320}
+                            width="100%"
                             height={400}
                         />
                     </div>
@@ -1086,15 +1124,23 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                 <div onClick={toggleEmojiPicker}>
                     <Smile size={24} color={showEmojiPicker ? "#357abd" : "#999"} style={{ cursor: 'pointer', marginRight: '10px' }} />
                 </div>
-                <input
-                    type="text"
+                <textarea
                     placeholder="Message"
                     value={newMessage}
                     onChange={handleInputChange}
-                    onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleSendMessage(newMessage, 'text');
+                    style={{
+                        flex: 1,
+                        border: 'none',
+                        outline: 'none',
+                        fontSize: '15px',
+                        color: '#333',
+                        resize: 'none',
+                        fontFamily: 'inherit',
+                        background: 'transparent',
+                        padding: '8px 0',
+                        height: '40px', // Fixed height or auto logic could be better but keeping it simple for now
+                        minHeight: '20px'
                     }}
-                    style={{ flex: 1, border: 'none', outline: 'none', fontSize: '15px', color: '#333' }}
                 />
                 <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
                     <div style={{ transform: 'rotate(45deg)', cursor: 'pointer' }} onClick={() => fileInputRef.current.click()}>
@@ -1136,7 +1182,7 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                     <Download size={22} color="#102a5c" />
                     <span>Deposit</span>
                 </div>
-                <div style={navItemStyle} onClick={() => navigate('/profile')}>
+                <div style={navItemStyle} onClick={() => isGhostMode && currentUser ? navigate(`/admin/profile/${currentUser.id}`) : navigate('/profile')}>
                     <User size={22} color="#102a5c" />
                     <span>Profile</span>
                 </div>

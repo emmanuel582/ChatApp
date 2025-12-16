@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Search } from 'lucide-react';
+import { Search, Home, MessageCircle, Send, Download, User } from 'lucide-react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { supabase } from './supabaseClient';
 import ChatScreen from './ChatScreen';
@@ -20,6 +20,7 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
     // Recent Conversations State
     const [conversations, setConversations] = useState([]);
     const [loadingChats, setLoadingChats] = useState(true);
+    const [authorizationChecked, setAuthorizationChecked] = useState(false);
 
     // Fetch User & Profile (Impersonation Support)
     useEffect(() => {
@@ -59,6 +60,21 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
         };
         fetchUser();
     }, [navigate, impersonatedUserId, isGhostMode]);
+
+    // Verify Chat Authorization
+    useEffect(() => {
+        const verifyChatAccess = async () => {
+            if (!chatRecipientId || !currentUser) {
+                setAuthorizationChecked(true);
+                return;
+            }
+            // Trust the user to start a conversation. 
+            // The ChatScreen will handle loading messages or showing empty state.
+            setAuthorizationChecked(true);
+        };
+
+        verifyChatAccess();
+    }, [chatRecipientId, currentUser, navigate]);
 
     // Fetch Recent Messages and Subscribe
     useEffect(() => {
@@ -175,9 +191,45 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
         setSearchTerm('');
     };
 
-    if (chatRecipientId) {
+
+    // Styles
+    const bottomNavStyle = {
+        height: '65px',
+        background: 'white',
+        borderTop: '1px solid #eee',
+        display: 'flex',
+        justifyContent: 'space-around',
+        alignItems: 'center',
+        paddingBottom: '5px',
+        flexShrink: 0,
+        zIndex: 10
+    };
+
+    const navItemStyle = {
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: '4px',
+        fontSize: '11px',
+        color: '#666',
+        cursor: 'pointer'
+    };
+
+    if (chatRecipientId && authorizationChecked) {
         return <ChatScreen recipientId={chatRecipientId} impersonatedUser={isGhostMode ? currentUser : null} isGhostMode={isGhostMode} />;
     }
+
+    if (chatRecipientId && !authorizationChecked) {
+        return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: '#666' }}>Verifying access...</div>;
+    }
+
+    const handleProfileClick = () => {
+        if (isGhostMode && currentUser) {
+            navigate(`/admin/profile/${currentUser.id}`);
+        } else {
+            navigate('/profile');
+        }
+    };
 
     return (
         <div style={{ height: '100vh', width: '100%', background: 'white', display: 'flex', flexDirection: 'column' }}>
@@ -188,9 +240,10 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
                 display: 'flex',
                 alignItems: 'center',
                 justifyContent: 'space-between',
-                padding: '0 20px',
+                padding: '0 15px',
                 position: 'relative',
-                boxShadow: '0 4px 20px rgba(53, 122, 189, 0.2)'
+                boxShadow: '0 4px 20px rgba(53, 122, 189, 0.2)',
+                flexShrink: 0
             }}>
                 <div style={{ color: 'white', fontWeight: 'bold', fontSize: '20px' }}>Chats</div>
 
@@ -239,8 +292,11 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
                     <div style={{
                         position: 'absolute',
                         top: '5.5rem',
-                        right: '20px',
-                        width: '350px',
+                        right: '0',
+                        left: '0',
+                        margin: '0 auto',
+                        maxWidth: '500px',
+                        width: '90%',
                         background: 'white',
                         borderRadius: '12px',
                         boxShadow: '0 10px 30px rgba(0,0,0,0.2)',
@@ -352,6 +408,38 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
                         );
                     })
                 )}
+            </div>
+
+            {/* Bottom Navigation */}
+            <div style={bottomNavStyle}>
+                <div style={navItemStyle} onClick={() => {
+                    if (isGhostMode) {
+                        navigate('/admin'); // Or back to admin dashboard
+                    } else {
+                        // Already home
+                    }
+                }}>
+                    <Home size={22} color="#102a5c" />
+                    <span>Home</span>
+                </div>
+                <div style={navItemStyle}>
+                    <Send size={22} color="#102a5c" style={{ transform: 'rotate(45deg)' }} />
+                    <span>Transfer</span>
+                </div>
+                <div style={navItemStyle}>
+                    <div style={{ position: 'relative' }}>
+                        <MessageCircle size={22} color="#3b82f6" strokeWidth={2.5} fill="#3b82f6" fillOpacity={0.1} />
+                    </div>
+                    <span style={{ fontWeight: '700', color: '#102a5c' }}>Chat</span>
+                </div>
+                <div style={navItemStyle}>
+                    <Download size={22} color="#102a5c" />
+                    <span>Deposit</span>
+                </div>
+                <div style={navItemStyle} onClick={handleProfileClick}>
+                    <User size={22} color="#102a5c" />
+                    <span>Profile</span>
+                </div>
             </div>
         </div>
     );

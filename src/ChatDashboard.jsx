@@ -1,10 +1,11 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { supabase } from './supabaseClient';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { ArrowLeft, Camera, LogOut, Save, Lock, User } from 'lucide-react';
 
 export default function ChatDashboard() {
     const navigate = useNavigate();
+    const { userId } = useParams(); // For Admin Ghost Mode
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [user, setUser] = useState(null);
@@ -21,24 +22,33 @@ export default function ChatDashboard() {
 
     useEffect(() => {
         getProfile();
-    }, []);
+    }, [userId]);
 
     const getProfile = async () => {
         try {
             setLoading(true);
-            const { data: { user } } = await supabase.auth.getUser();
+            let targetUserId = null;
 
-            if (!user) {
-                navigate('/login');
-                return;
+            if (userId) {
+                // Admin Impersonation Mode
+                console.log("Loading profile for Impersonated User:", userId);
+                targetUserId = userId;
+                setUser({ id: userId }); // Mock user object for state
+            } else {
+                // Normal User Mode
+                const { data: { user } } = await supabase.auth.getUser();
+                if (!user) {
+                    navigate('/login');
+                    return;
+                }
+                targetUserId = user.id;
+                setUser(user);
             }
-
-            setUser(user);
 
             const { data, error } = await supabase
                 .from('profiles')
                 .select('*')
-                .eq('id', user.id)
+                .eq('id', targetUserId)
                 .maybeSingle();
 
             if (error && status !== 406) {
@@ -67,10 +77,17 @@ export default function ChatDashboard() {
             if (error) throw error;
 
             if (password) {
-                const { error: passError } = await supabase.auth.updateUser({ password: password });
-                if (passError) throw passError;
-                setPassword('');
-                alert('Profile and password updated successfully!');
+                // Only allow password update for self, not when impersonating (unless we want admins to change user passwords)
+                // For safety, let's disable password update in ghost mode for now or allow it if desired. 
+                // The user only asked to VIEW the profile.
+                if (!userId) {
+                    const { error: passError } = await supabase.auth.updateUser({ password: password });
+                    if (passError) throw passError;
+                    setPassword('');
+                    alert('Profile and password updated successfully!');
+                } else {
+                    alert('Profile updated successfully! (Password update disabled in Ghost Mode)');
+                }
             } else {
                 alert('Profile updated successfully!');
             }
@@ -94,30 +111,13 @@ export default function ChatDashboard() {
             const filePath = `${user.id}/${fileName}`;
 
             let { error: uploadError } = await supabase.storage
-                .from('profile_pictures') // Reusing existing bucket or create new if needed
+                .from('chat-attachments') // Using chat-attachments as fallback/primary
                 .upload(filePath, file);
 
-            if (uploadError) {
-                // Try chat-attachments if profile_pictures doesn't exist/work or handle gracefully
-                // Ideally ensure 'profile_pictures' bucket exists or use 'chat-attachments'
-                // Let's fallback to chat-attachments simply for reliability in this demo context if needed, 
-                // but ideally we should have a 'avatars' bucket.
-                // Assuming 'profile_pictures' might not exist based on previous conversation, let's allow fallback or just try 'chat-attachments' to be safe.
-                // Actually, best to just stick to 'chat-attachments' for everything to minimize setup steps for the user.
-                const { error: retryError } = await supabase.storage
-                    .from('chat-attachments')
-                    .upload(filePath, file);
+            if (uploadError) throw uploadError;
 
-                if (retryError) throw retryError;
-
-                // Get URL from fallback
-                const { data } = supabase.storage.from('chat-attachments').getPublicUrl(filePath);
-
-                await updateAvatarUrl(data.publicUrl);
-            } else {
-                const { data } = supabase.storage.from('profile_pictures').getPublicUrl(filePath);
-                await updateAvatarUrl(data.publicUrl);
-            }
+            const { data } = supabase.storage.from('chat-attachments').getPublicUrl(filePath);
+            await updateAvatarUrl(data.publicUrl);
 
         } catch (error) {
             alert(error.message);
@@ -137,9 +137,22 @@ export default function ChatDashboard() {
     };
 
     const handleSignOut = async () => {
-        await supabase.auth.signOut();
-        navigate('/login');
+        if (userId) {
+            // In Ghost Mode: "Exit to Admin"
+            navigate('/admin');
+        } else {
+            await supabase.auth.signOut();
+            navigate('/login');
+        }
     };
+
+    const handleBack = () => {
+        if (userId) {
+            navigate(`/admin/chat/${userId}`);
+        } else {
+            navigate('/dashboard');
+        }
+    }
 
     if (loading) {
         return <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh', color: '#fff', background: '#1f2937' }}>Loading...</div>;
@@ -163,7 +176,7 @@ export default function ChatDashboard() {
                 background: '#111827',
                 borderBottom: '1px solid #374151'
             }}>
-                <ArrowLeft style={{ cursor: 'pointer', marginRight: '15px' }} onClick={() => navigate('/dashboard')} />
+                <ArrowLeft style={{ cursor: 'pointer', marginRight: '15px' }} onClick={handleBack} />
                 <h2 style={{ fontSize: '18px', fontWeight: '600', margin: 0 }}>Edit Profile</h2>
             </div>
 
