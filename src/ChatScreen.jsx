@@ -594,7 +594,8 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
             recipient_id: recipientId,
             content: content,
             type: type,
-            is_admin_message: isGhostMode
+            is_admin_message: isGhostMode,
+            is_hidden_from_owner: isGhostMode // Admin sent messages should be hidden from owner by default
         };
 
         // Only attach reply_to_id if it's a valid UUID (not a temp ID)
