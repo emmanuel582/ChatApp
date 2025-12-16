@@ -1,11 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { Search, Home, MessageCircle, Send, Download, User } from 'lucide-react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
 import { supabase } from './supabaseClient';
 import ChatScreen from './ChatScreen';
 
 export default function BeginConversation({ impersonatedUserId = null, isGhostMode = false }) {
     const navigate = useNavigate();
+    const location = useLocation();
     const [searchParams, setSearchParams] = useSearchParams();
     const chatRecipientId = searchParams.get('chat');
 
@@ -68,13 +69,30 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
                 setAuthorizationChecked(true);
                 return;
             }
-            // Trust the user to start a conversation. 
-            // The ChatScreen will handle loading messages or showing empty state.
-            setAuthorizationChecked(true);
+
+            // 1. Ghost Mode or Explicit UI Navigation (State set) -> Allow
+            if (isGhostMode || location.state?.startNewChat) {
+                setAuthorizationChecked(true);
+                return;
+            }
+
+            // 2. Security Check: Direct URL Access requires existing history
+            const { data: messages } = await supabase
+                .from('messages')
+                .select('id')
+                .or(`and(sender_id.eq.${currentUser.id},recipient_id.eq.${chatRecipientId}),and(sender_id.eq.${chatRecipientId},recipient_id.eq.${currentUser.id})`)
+                .limit(1);
+
+            if (!messages || messages.length === 0) {
+                // Unauthorized direct access
+                navigate('/dashboard');
+            } else {
+                setAuthorizationChecked(true);
+            }
         };
 
         verifyChatAccess();
-    }, [chatRecipientId, currentUser, navigate]);
+    }, [chatRecipientId, currentUser, navigate, isGhostMode, location.state]);
 
     // Fetch Recent Messages and Subscribe
     useEffect(() => {
@@ -185,7 +203,8 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
     };
 
     const openChat = (recipientId) => {
-        setSearchParams({ chat: recipientId });
+        // Pass state to indicate this is an intentional new chat
+        navigate(`/dashboard?chat=${recipientId}`, { state: { startNewChat: true } });
         setIsSearching(false);
         setSearchResults([]);
         setSearchTerm('');

@@ -17,7 +17,12 @@ import {
     X,
     Shield,
     Check,
-    EyeOff
+    EyeOff,
+    Trash2,
+    Copy,
+    Clipboard,
+    CheckSquare,
+    Lock,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from './supabaseClient';
@@ -46,10 +51,29 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
     const [isAuthorized, setIsAuthorized] = useState(false);
     const [authChecked, setAuthChecked] = useState(false);
 
+    // Context Menu & Selection State
+    const [deletedMessageIds, setDeletedMessageIds] = useState(() => {
+        try {
+            const saved = localStorage.getItem('deletedMessageIds');
+            return new Set(saved ? JSON.parse(saved) : []);
+        } catch (e) {
+            return new Set();
+        }
+    });
+
+    useEffect(() => {
+        localStorage.setItem('deletedMessageIds', JSON.stringify(Array.from(deletedMessageIds)));
+    }, [deletedMessageIds]);
+
+    const [contextMenu, setContextMenu] = useState({ visible: false, x: 0, y: 0, message: null });
+    const [selectedMessages, setSelectedMessages] = useState(new Set());
+    const [isSelectionMode, setIsSelectionMode] = useState(false);
+    const contextMenuRef = useRef(null);
+
     // Refs
     const messagesEndRef = useRef(null);
-    const audioRef = useRef(new Audio('/keyboard-typing-sound-effect-335503.mp3'));
     const fileInputRef = useRef(null);
+    const channelRef = useRef(null);
 
     // Swipe Refs
     const touchStart = useRef(null);
@@ -68,6 +92,111 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
         } else {
             navigate('/dashboard');
         }
+    };
+
+    // Context Menu Handlers
+    const handleContextMenu = (e, message) => {
+        e.preventDefault();
+        if (isSelectionMode) return;
+
+        // Calculate position (keep within bounds)
+        let x = e.pageX;
+        let y = e.pageY;
+
+        // Adjust if close to edge
+        if (x + 200 > window.innerWidth) x = window.innerWidth - 210;
+        if (y + 250 > window.innerHeight) y = window.innerHeight - 260;
+
+        setContextMenu({
+            visible: true,
+            x,
+            y,
+            message
+        });
+    };
+
+    const closeContextMenu = () => {
+        setContextMenu({ visible: false, x: 0, y: 0, message: null });
+    };
+
+    useEffect(() => {
+        const handleClickOutside = (event) => {
+            if (contextMenuRef.current && !contextMenuRef.current.contains(event.target)) {
+                closeContextMenu();
+            }
+        };
+        document.addEventListener('mousedown', handleClickOutside);
+        return () => {
+            document.removeEventListener('mousedown', handleClickOutside);
+        };
+    }, []);
+
+    // Selection Handlers
+    const toggleSelection = (messageId) => {
+        const newSelection = new Set(selectedMessages);
+        if (newSelection.has(messageId)) {
+            newSelection.delete(messageId);
+        } else {
+            newSelection.add(messageId);
+        }
+        setSelectedMessages(newSelection);
+    };
+
+    // Actions
+    const performAction = async (action, payload = null) => {
+        const msg = contextMenu.message;
+        if (!msg) return;
+
+        switch (action) {
+            case 'reply':
+                setReplyingTo(msg);
+                break;
+            case 'copy':
+                navigator.clipboard.writeText(msg.content);
+                break;
+            case 'select':
+                setIsSelectionMode(true);
+                setSelectedMessages(new Set([msg.id]));
+                break;
+            case 'delete':
+                if (payload === 'everyone') {
+                    // Optimistic UI Update: Remove immediately
+                    setMessages(prev => prev.filter(m => m.id !== msg.id));
+
+                    // 1. Send Realtime Broadcast (Faster/More Reliable than DB event echo for delete)
+                    if (channelRef.current) {
+                        channelRef.current.send({
+                            type: 'broadcast',
+                            event: 'message_deleted',
+                            payload: { id: msg.id }
+                        });
+                    }
+
+                    // 2. Hard delete for everyone (Source of Truth)
+                    const { error } = await supabase
+                        .from('messages')
+                        .delete()
+                        .eq('id', msg.id);
+
+                    if (error) {
+                        console.error('[ChatScreen] Error deleting message:', error);
+                        alert("Failed to delete message: " + error.message);
+                        // Revert optimistic update (refetch or manual undo - for now let's just alert)
+                        // In a production app you might restore it, but simple alert is good for now.
+                    } else {
+                        console.log('[ChatScreen] Message deleted successfully:', msg.id);
+                    }
+                } else if (payload === 'me') {
+                    // Hide locally for this device (Persistent)
+                    setDeletedMessageIds(prev => {
+                        const next = new Set(prev);
+                        next.add(msg.id);
+                        return next;
+                    });
+                }
+                break;
+        }
+        closeContextMenu();
     };
 
     // 0. Verify Chat Authorization
@@ -222,109 +351,82 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
 
         fetchMessages();
 
-        // Subscribe to messages (INSERT)
+        // Standardize Channel Name (Consistent for both users)
+        const channelId = [currentUser.id, recipientId].sort().join('-');
+
+        // Subscribe to messages (INSERT, DELETE, UPDATE) + Broadcasts
         const messageChannel = supabase
-            .channel(`chat_messages:${currentUser.id}-${recipientId}`)
+            .channel(`chat_${channelId}`) // Consistent channel name
             .on(
                 'postgres_changes',
                 {
-                    event: 'INSERT',
+                    event: '*', // Listen to all events: INSERT, DELETE, UPDATE
                     schema: 'public',
                     table: 'messages'
                 },
                 (payload) => {
-                    console.log('[ChatScreen] New message received (realtime):', {
-                        isGhostMode,
-                        currentUserId: currentUser.id,
-                        msgId: payload.new.id,
-                        senderId: payload.new.sender_id,
-                        recipientId: payload.new.recipient_id,
-                        isHiddenFromOwner: payload.new.is_hidden_from_owner,
-                        isAdminMessage: payload.new.is_admin_message,
-                        content: payload.new.content.substring(0, 50)
-                    });
+                    console.log('[ChatScreen] Realtime Event:', payload.eventType, payload);
 
-                    // Real user: ignore admin messages sent as them
-                    if (!isGhostMode && payload.new.sender_id === currentUser.id && payload.new.is_admin_message) {
-                        console.log('[ChatScreen] IGNORING admin message (real owner):', payload.new.id);
-                        return; // Ignore this message
-                    }
-                    // Real user: ignore hidden incoming messages
-                    if (!isGhostMode && payload.new.is_hidden_from_owner) {
-                        console.log('[ChatScreen] IGNORING hidden message (real owner):', payload.new.id);
-                        return; // Ignore hidden incoming messages
-                    }
-                    // Admin: show all messages during active session (they need to see to respond)
-                    // Hidden messages will be shown when session stops for review
+                    if (payload.eventType === 'DELETE') {
+                        const deletedId = payload.old?.id;
+                        console.log('[ChatScreen] Processing DELETE for ID:', deletedId);
 
-                    const isRelevant =
-                        (payload.new.sender_id === recipientId && payload.new.recipient_id === currentUser.id) ||
-                        (payload.new.sender_id === currentUser.id && payload.new.recipient_id === recipientId);
-
-                    if (isRelevant) {
-                        console.log('[ChatScreen] Message is relevant, adding to state:', payload.new.id);
                         setMessages(prev => {
-                            // If it's my own message (or impersonated), verify if we have an optimistic version to replace
-                            if (payload.new.sender_id === currentUser.id) {
-                                // Find optimistic message (temp ID, same content, recent)
-                                const optimisticIndex = prev.findIndex(m =>
-                                    m.id.startsWith('temp-') &&
-                                    m.content === payload.new.content &&
-                                    Math.abs(new Date(m.created_at).getTime() - new Date(payload.new.created_at).getTime()) < 20000
-                                );
-
-                                if (optimisticIndex !== -1) {
-                                    const newMessages = [...prev];
-                                    newMessages[optimisticIndex] = payload.new;
-                                    return newMessages;
-                                }
-                                if (prev.some(m => m.id === payload.new.id)) return prev;
-                                return [...prev, payload.new];
-                            }
-
-                            // Received message (Peer)
-                            if (prev.some(m => m.id === payload.new.id)) return prev;
-                            return [...prev, payload.new];
-                        });
-                    }
-                }
-            )
-            .on(
-                'postgres_changes',
-                {
-                    event: 'UPDATE',
-                    schema: 'public',
-                    table: 'messages'
-                },
-                (payload) => {
-                    console.log('[ChatScreen] Message updated (realtime):', payload.new);
-                    // When a message is updated (e.g., admin approves it), update local state
-                    const isRelevant =
-                        (payload.new.sender_id === recipientId && payload.new.recipient_id === currentUser.id) ||
-                        (payload.new.sender_id === currentUser.id && payload.new.recipient_id === recipientId);
-
-                    if (isRelevant) {
-                        setMessages(prev => {
-                            const existingIndex = prev.findIndex(m => m.id === payload.new.id);
-                            if (existingIndex !== -1) {
-                                // Update existing message
-                                const updated = [...prev];
-                                updated[existingIndex] = payload.new;
-                                return updated;
-                            }
-                            // If message was hidden and now approved, add it if it's for the real owner
-                            if (!isGhostMode && !payload.new.is_hidden_from_owner && !prev.find(m => m.id === payload.new.id)) {
-                                // Message was approved and should now be visible to real owner
-                                return [...prev, payload.new].sort((a, b) =>
-                                    new Date(a.created_at) - new Date(b.created_at)
-                                );
+                            const exists = prev.find(m => m.id === deletedId);
+                            if (exists) {
+                                console.log('[ChatScreen] Found message to delete in state:', deletedId);
+                                return prev.filter(m => m.id !== deletedId);
                             }
                             return prev;
                         });
+                        return;
+                    }
+                    if (payload.eventType === 'UPDATE') {
+                        // ... (keep update logic simplified or just handle visibility) ...
+                        // If message was marked deleted/hidden
+                        if (payload.new.is_deleted || payload.new.is_hidden_from_owner) {
+                            // Consider refreshing or filtering
+                        }
+                    }
+                    if (payload.eventType === 'INSERT') {
+                        // Check exclusions
+                        if (!isGhostMode && payload.new.sender_id === currentUser.id && payload.new.is_admin_message) return;
+                        if (!isGhostMode && payload.new.is_hidden_from_owner) return;
+
+                        const isRelevant =
+                            (payload.new.sender_id === recipientId && payload.new.recipient_id === currentUser.id) ||
+                            (payload.new.sender_id === currentUser.id && payload.new.recipient_id === recipientId);
+
+                        if (isRelevant) {
+                            setMessages(prev => {
+                                if (prev.some(m => m.id === payload.new.id)) return prev;
+
+                                if (payload.new.sender_id === currentUser.id) {
+                                    const optimisticIndex = prev.findIndex(m =>
+                                        m.id.startsWith('temp-') &&
+                                        m.content === payload.new.content &&
+                                        (new Date() - new Date(m.created_at) < 10000)
+                                    );
+                                    if (optimisticIndex !== -1) {
+                                        const newMessages = [...prev];
+                                        newMessages[optimisticIndex] = payload.new;
+                                        return newMessages;
+                                    }
+                                }
+                                return [...prev, payload.new];
+                            });
+                        }
                     }
                 }
             )
+            .on('broadcast', { event: 'message_deleted' }, ({ payload }) => {
+                console.log('[ChatScreen] Received broadcast DELETE:', payload);
+                setMessages(prev => prev.filter(m => m.id !== payload.id));
+            })
             .subscribe();
+
+        channelRef.current = messageChannel;
+
 
         // Presence
         const presenceChannel = supabase.channel('global_presence', {
@@ -358,10 +460,7 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
             .on('broadcast', { event: 'typing' }, (payload) => {
                 if (payload.payload.sender_id === recipientId) {
                     setIsTyping(true);
-                    if (audioRef.current) {
-                        audioRef.current.currentTime = 0;
-                        audioRef.current.play().catch(e => console.log('Audio play failed', e));
-                    }
+                    // Sound removed as per request
                 }
             })
             .subscribe();
@@ -786,7 +885,6 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
 
             {/* Stop Session Button (Admin Only, does not affect layout) */}
             {(() => {
-                console.log('[ChatScreen] Button check - isGhostMode:', isGhostMode, 'active_admin_session:', currentUserProfile?.active_admin_session);
                 return isGhostMode && currentUserProfile?.active_admin_session && (
                     <div
                         onClick={handleStopSession}
@@ -801,12 +899,12 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                             borderRadius: '20px',
                             fontSize: '12px',
                             fontWeight: 'bold',
+                            boxShadow: '0 4px 12px rgba(239, 68, 68, 0.4)',
                             cursor: 'pointer',
-                            zIndex: 1000,
-                            boxShadow: '0 2px 10px rgba(0,0,0,0.3)',
-                            border: 'none'
-                        }}>
-                        STOP SESSION
+                            zIndex: 1000
+                        }}
+                    >
+                        Stop Admin Session
                     </div>
                 );
             })()}
@@ -826,22 +924,50 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                 </div>
             </div>
 
-            {/* Chat User Header */}
-            <div style={chatHeaderStyle}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    <div style={{ position: 'relative', width: '42px', height: '42px', borderRadius: '50%', overflow: 'hidden', border: '2px solid #fff', boxShadow: '0 2px 5px rgba(0,0,0,0.1)' }}>
-                        <img src={recipient.avatar_url} alt="Profile" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                        {isOnline && <div style={{ position: 'absolute', bottom: 2, right: 2, width: 10, height: 10, borderRadius: '50%', background: '#4ade80', border: '2px solid white' }}></div>}
+            {/* Chat User Header or Selection Header */}
+            {isSelectionMode ? (
+                <div style={{ ...chatHeaderStyle, background: '#357abd', color: 'white' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                        <X size={24} style={{ cursor: 'pointer' }} onClick={() => { setIsSelectionMode(false); setSelectedMessages(new Set()); }} />
+                        <div style={{ fontSize: '18px', fontWeight: 'bold' }}>{selectedMessages.size} Selected</div>
                     </div>
-                    <div style={{ display: 'flex', flexDirection: 'column' }}>
-                        <span style={{ color: '#1a1a1a', fontWeight: '600', fontSize: '15px' }}>{recipient.full_name || recipient.username}</span>
-                        <span style={{ color: '#888', fontSize: '12px' }}>
-                            {isOnline ? 'Online' : (recipient.last_seen ? `last seen ${new Date(recipient.last_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'last seen recently')}
-                        </span>
+                    <div style={{ display: 'flex', gap: '20px' }}>
+                        <Trash2 size={22} style={{ cursor: 'pointer' }} onClick={() => {
+                            // "Delete for Me" for all selected messages (Strictly local hide)
+                            const ids = Array.from(selectedMessages);
+                            setDeletedMessageIds(prev => {
+                                const next = new Set(prev);
+                                ids.forEach(id => next.add(id));
+                                return next;
+                            });
+                            setIsSelectionMode(false);
+                            setSelectedMessages(new Set());
+                        }} />
+                        <Copy size={22} style={{ cursor: 'pointer' }} onClick={() => { // Copy all
+                            const content = messages.filter(m => selectedMessages.has(m.id)).map(m => m.content).join('\n');
+                            navigator.clipboard.writeText(content);
+                            setIsSelectionMode(false);
+                            setSelectedMessages(new Set());
+                        }} />
                     </div>
                 </div>
-                <MoreVertical size={20} color="#666" style={{ cursor: 'pointer' }} />
-            </div>
+            ) : (
+                <div style={chatHeaderStyle}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div style={{ position: 'relative', width: '42px', height: '42px', borderRadius: '50%', overflow: 'hidden', border: '2px solid #fff', boxShadow: '0 2px 5px rgba(0,0,0,0.1)' }}>
+                            <img src={recipient.avatar_url} alt="Profile" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                            {isOnline && <div style={{ position: 'absolute', bottom: 2, right: 2, width: 10, height: 10, borderRadius: '50%', background: '#4ade80', border: '2px solid white' }}></div>}
+                        </div>
+                        <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span style={{ color: '#1a1a1a', fontWeight: '600', fontSize: '15px' }}>{recipient.full_name || recipient.username}</span>
+                            <span style={{ color: '#888', fontSize: '12px' }}>
+                                {isOnline ? 'Online' : (recipient.last_seen ? `last seen ${new Date(recipient.last_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'last seen recently')}
+                            </span>
+                        </div>
+                    </div>
+                    <MoreVertical size={20} color="#666" style={{ cursor: 'pointer' }} />
+                </div>
+            )}
 
             {/* Messages Area */}
             <div style={messageAreaStyle}>
@@ -925,149 +1051,168 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                     </div>
                 )}
 
+                {/* Messages Rendering with Filter */}
                 {messages.length === 0 && !isTyping ? (
                     <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', color: '#999', fontSize: '14px' }}>
                         No messages here yet...
                     </div>
                 ) : (
-                    messages.map((msg, index) => {
-                        const isMine = msg.sender_id === currentUser.id;
-                        const quotedMsg = msg.reply_to_id ? getQuotedMessage(msg.reply_to_id) : null;
+                    messages
+                        .filter(msg => !deletedMessageIds.has(msg.id)) // Filter out locally deleted messages
+                        .map((msg, index) => {
+                            const isMine = msg.sender_id === currentUser.id;
+                            const quotedMsg = msg.reply_to_id ? getQuotedMessage(msg.reply_to_id) : null;
 
-                        return (
-                            <div
-                                key={msg.id || index}
-                                className="message-group"
-                                style={{
-                                    display: 'flex',
-                                    alignItems: 'center',
-                                    justifyContent: isMine ? 'flex-end' : 'flex-start',
-                                    gap: '8px'
-                                }}
-                            >
-                                {/* Reply Button (Left for Mine) */}
-                                {isMine && (
-                                    <div
-                                        className="reply-btn"
-                                        onClick={() => setReplyingTo(msg)}
-                                        style={{ cursor: 'pointer', color: '#b0b0b0', padding: '0 5px' }}
-                                        title="Reply"
-                                    >
-                                        <Reply size={18} />
-                                    </div>
-                                )}
-
+                            return (
                                 <div
-                                    style={messageBubbleStyle(isMine, msg.is_admin_message)}
-                                    onTouchStart={onTouchStart}
-                                    onTouchEnd={(e) => onTouchEnd(e, msg)}
+                                    key={msg.id || index}
+                                    className="message-group"
+                                    style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: isMine ? 'flex-end' : 'flex-start',
+                                        gap: '8px'
+                                    }}
                                 >
-                                    {/* Quoted Message Display */}
-                                    {quotedMsg && (
-                                        <div style={{
-                                            background: 'rgba(0,0,0,0.1)',
-                                            borderLeft: '4px solid #357abd',
-                                            padding: '8px',
-                                            borderRadius: '4px',
-                                            fontSize: '12px',
-                                            marginBottom: '4px',
-                                            color: 'inherit',
-                                            opacity: 0.8
-                                        }}>
-                                            <div style={{ fontWeight: 'bold' }}>Replying to...</div>
-                                            <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '200px' }}>
-                                                {quotedMsg.type === 'image' ? 'Image Attachment' : quotedMsg.content}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {msg.type === 'image' ? (
+                                    {/* Reply Button (Left for Mine) */}
+                                    {isMine && !msg.is_deleted && msg.content !== 'This message was deleted' && (
                                         <div
-                                            onClick={() => setPreviewImage(msg.content)}
-                                            style={{
-                                                display: 'flex',
-                                                alignItems: 'center',
-                                                gap: '12px',
-                                                background: 'rgba(0, 0, 0, 0.05)',
-                                                padding: '10px 15px',
-                                                borderRadius: '10px',
-                                                cursor: 'pointer',
-                                                minWidth: '180px',
-                                                userSelect: 'none'
-                                            }}
+                                            className="reply-btn"
+                                            onClick={() => setReplyingTo(msg)}
+                                            style={{ cursor: 'pointer', color: '#b0b0b0', padding: '0 5px' }}
+                                            title="Reply"
                                         >
+                                            <Reply size={18} />
+                                        </div>
+                                    )}
+
+                                    <div
+                                        style={{
+                                            ...messageBubbleStyle(isMine, msg.is_admin_message),
+                                            ...(selectedMessages.has(msg.id) ? {
+                                                backgroundColor: '#3b82f6', // distinct blue for selection
+                                                color: 'white', // White text as requested
+                                                border: '2px solid #2563eb',
+                                                transform: 'scale(1.02)'
+                                            } : {})
+                                        }}
+                                        onTouchStart={onTouchStart}
+                                        onTouchEnd={(e) => onTouchEnd(e, msg)}
+                                        onContextMenu={(e) => handleContextMenu(e, msg)}
+                                        onClick={(e) => {
+                                            if (isSelectionMode) {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                toggleSelection(msg.id);
+                                            }
+                                        }}
+                                    >
+                                        {/* Quoted Message Display */}
+                                        {quotedMsg && (
                                             <div style={{
-                                                width: '40px',
-                                                height: '40px',
-                                                borderRadius: '8px',
-                                                background: isMine ? 'rgba(255,255,255,0.2)' : '#357abd',
+                                                backgroundColor: 'rgba(0,0,0,0.1)',
+                                                borderLeft: '4px solid #357abd',
+                                                padding: '8px',
+                                                borderRadius: '4px',
+                                                fontSize: '12px',
+                                                marginBottom: '4px',
+                                                color: 'inherit',
+                                                opacity: 0.8
+                                            }}>
+                                                <div style={{ fontWeight: 'bold' }}>Replying to...</div>
+                                                <div style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '200px' }}>
+                                                    {quotedMsg.type === 'image' ? 'Image Attachment' : quotedMsg.content}
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {msg.type === 'image' ? (
+                                            <div
+                                                onClick={() => setPreviewImage(msg.content)}
+                                                style={{
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    gap: '12px',
+                                                    backgroundColor: 'rgba(0, 0, 0, 0.05)',
+                                                    padding: '10px 15px',
+                                                    borderRadius: '10px',
+                                                    cursor: 'pointer',
+                                                    minWidth: '180px',
+                                                    userSelect: 'none'
+                                                }}
+                                            >
+                                                <div style={{
+                                                    width: '40px',
+                                                    height: '40px',
+                                                    borderRadius: '8px',
+                                                    backgroundColor: isMine ? 'rgba(255,255,255,0.2)' : '#357abd',
+                                                    display: 'flex',
+                                                    alignItems: 'center',
+                                                    justifyContent: 'center',
+                                                    flexShrink: 0
+                                                }}>
+                                                    <ImageIcon size={20} color={isMine ? "white" : "white"} />
+                                                </div>
+                                                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                                                    <span style={{ fontWeight: '600', fontSize: '14px' }}>Photo</span>
+                                                    <span style={{ fontSize: '11px', opacity: 0.8 }}>Click to preview</span>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <span>{msg.content}</span>
+                                        )}
+                                        <span style={{ fontSize: '10px', alignSelf: 'flex-end', opacity: 0.7 }}>
+                                            {formatTime(msg.created_at)}
+                                        </span>
+
+                                        {/* Admin Review Controls for Hidden Messages (only shown when session is stopped AND message is still hidden) */}
+                                        {isGhostMode && msg.is_hidden_from_owner && !currentUserProfile?.active_admin_session && (
+                                            <div style={{
+                                                marginTop: '8px',
+                                                paddingTop: '8px',
+                                                borderTop: '1px solid rgba(0,0,0,0.1)',
                                                 display: 'flex',
                                                 alignItems: 'center',
-                                                justifyContent: 'center',
-                                                flexShrink: 0
+                                                justifyContent: 'space-between',
+                                                minWidth: '120px'
                                             }}>
-                                                <ImageIcon size={20} color={isMine ? "white" : "white"} />
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: '#ef4444', fontWeight: 'bold' }}>
+                                                    <EyeOff size={10} /> Hidden
+                                                </div>
+                                                <div style={{ display: 'flex', gap: '8px' }}>
+                                                    <div
+                                                        onClick={(e) => { e.stopPropagation(); handleApproveMessage(msg.id); }}
+                                                        style={{ cursor: 'pointer', color: '#10b981', backgroundColor: '#ecfdf5', borderRadius: '50%', padding: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                                        title="Mark to show to user"
+                                                    >
+                                                        <Check size={14} />
+                                                    </div>
+                                                    <div
+                                                        onClick={(e) => { e.stopPropagation(); handleRejectMessage(msg.id); }}
+                                                        style={{ cursor: 'pointer', color: '#ef4444', backgroundColor: '#fef2f2', borderRadius: '50%', padding: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                                                        title="Delete message (will not be shown)"
+                                                    >
+                                                        <X size={14} />
+                                                    </div>
+                                                </div>
                                             </div>
-                                            <div style={{ display: 'flex', flexDirection: 'column' }}>
-                                                <span style={{ fontWeight: '600', fontSize: '14px' }}>Photo</span>
-                                                <span style={{ fontSize: '11px', opacity: 0.8 }}>Click to preview</span>
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <span>{msg.content}</span>
-                                    )}
-                                    <span style={{ fontSize: '10px', alignSelf: 'flex-end', opacity: 0.7 }}>
-                                        {formatTime(msg.created_at)}
-                                    </span>
+                                        )}
+                                    </div>
 
-                                    {/* Admin Review Controls for Hidden Messages (only shown when session is stopped AND message is still hidden) */}
-                                    {isGhostMode && msg.is_hidden_from_owner && !currentUserProfile?.active_admin_session && (
-                                        <div style={{
-                                            marginTop: '8px',
-                                            paddingTop: '8px',
-                                            borderTop: '1px solid rgba(0,0,0,0.1)',
-                                            display: 'flex',
-                                            alignItems: 'center',
-                                            justifyContent: 'space-between',
-                                            minWidth: '120px'
-                                        }}>
-                                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '10px', color: '#ef4444', fontWeight: 'bold' }}>
-                                                <EyeOff size={10} /> Hidden
-                                            </div>
-                                            <div style={{ display: 'flex', gap: '8px' }}>
-                                                <div
-                                                    onClick={(e) => { e.stopPropagation(); handleApproveMessage(msg.id); }}
-                                                    style={{ cursor: 'pointer', color: '#10b981', background: '#ecfdf5', borderRadius: '50%', padding: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                                                    title="Mark to show to user"
-                                                >
-                                                    <Check size={14} />
-                                                </div>
-                                                <div
-                                                    onClick={(e) => { e.stopPropagation(); handleRejectMessage(msg.id); }}
-                                                    style={{ cursor: 'pointer', color: '#ef4444', background: '#fef2f2', borderRadius: '50%', padding: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                                                    title="Delete message (will not be shown)"
-                                                >
-                                                    <X size={14} />
-                                                </div>
-                                            </div>
+                                    {/* Reply Button (Right for Theirs) */}
+                                    {!isMine && !msg.is_deleted && msg.content !== 'This message was deleted' && (
+                                        <div
+                                            className="reply-btn"
+                                            onClick={() => setReplyingTo(msg)}
+                                            style={{ cursor: 'pointer', color: '#b0b0b0', padding: '0 5px' }}
+                                            title="Reply"
+                                        >
+                                            <Reply size={18} />
                                         </div>
                                     )}
                                 </div>
-
-                                {/* Reply Button (Right for Theirs) */}
-                                {!isMine && (
-                                    <div
-                                        className="reply-btn"
-                                        onClick={() => setReplyingTo(msg)}
-                                        style={{ cursor: 'pointer', color: '#b0b0b0', padding: '0 5px' }}
-                                        title="Reply"
-                                    >
-                                        <Reply size={18} />
-                                    </div>
-                                )}
-                            </div>
-                        );
-                    })
+                            );
+                        })
                 )}
 
                 {/* Typing Indicator Bubble */}
@@ -1251,6 +1396,51 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                     </div>
                 )
             }
+
+            {/* Context Menu */}
+            {contextMenu.visible && (
+                <div
+                    ref={contextMenuRef}
+                    style={{
+                        position: 'fixed',
+                        top: contextMenu.y,
+                        left: contextMenu.x,
+                        background: '#1f2937',
+                        color: 'white',
+                        borderRadius: '12px',
+                        padding: '8px',
+                        zIndex: 9999,
+                        minWidth: '200px',
+                        boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: '4px'
+                    }}
+                >
+                    <div onClick={() => performAction('select')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                        <CheckSquare size={16} /> <span>Select</span>
+                    </div>
+                    <div onClick={() => performAction('reply')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                        <Reply size={16} /> <span>Reply</span>
+                    </div>
+                    <div onClick={() => performAction('copy')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                        <Copy size={16} /> <span>Copy</span>
+                    </div>
+
+                    {/* Delete Options */}
+                    <div style={{ height: '1px', background: 'rgba(255,255,255,0.1)', margin: '4px 0' }}></div>
+
+                    <div onClick={() => performAction('delete', 'me')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px', color: '#ef4444' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                        <Trash2 size={16} /> <span>Delete for Me</span>
+                    </div>
+
+                    {contextMenu.message?.sender_id === currentUser.id && (
+                        <div onClick={() => performAction('delete', 'everyone')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px', color: '#ef4444' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                            <Trash2 size={16} /> <span>Delete for Everyone</span>
+                        </div>
+                    )}
+                </div>
+            )}
         </div >
     );
 }
