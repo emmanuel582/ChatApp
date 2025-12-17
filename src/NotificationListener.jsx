@@ -98,38 +98,114 @@ export default function NotificationListener() {
             const body = msg.type === 'image' ? 'Sent a photo' : (msg.type === 'audio' ? 'Sent a voice note' : msg.content);
 
             try {
-                const notification = new Notification(title, {
-                    body: body,
-                    icon: '/vite.svg',
-                    tag: 'message-notification', // Overwrite old if needed, or unique per sender? 
-                    // Let's use unique tag per sender so they stack if from different people, but replace if same person
-                    tag: `msg-${msg.sender_id}`,
-                    renotify: true, // Vibrate/sound again even if replacing
-                    requireInteraction: false
+                // Create notification
+                const notification = new Notification(senderName, {
+                    body: msg.content || 'Sent a photo',
+                    icon: '/vite.svg', // Fallback icon
+                    tag: msg.sender_id, // Group updates from same sender
+                    requireInteraction: false // Don't keep it open forever
                 });
+
+                // Play Sound
+                try {
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    const oscillator = audioContext.createOscillator();
+                    const gainNode = audioContext.createGain();
+
+                    oscillator.connect(gainNode);
+                    gainNode.connect(audioContext.destination);
+
+                    oscillator.type = 'sine';
+                    oscillator.frequency.setValueAtTime(500, audioContext.currentTime);
+                    oscillator.frequency.exponentialRampToValueAtTime(1000, audioContext.currentTime + 0.1);
+
+                    gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
+
+                    oscillator.start();
+                    oscillator.stop(audioContext.currentTime + 0.5);
+                } catch (e) {
+                    console.error("Audio play failed", e);
+                }
+
+                // Vibrate (Mobile)
+                if (navigator.vibrate) {
+                    navigator.vibrate([200, 100, 200]);
+                }
 
                 notification.onclick = () => {
                     window.focus();
-                    notification.close();
+                    // We could try to navigate to the chat, but that requires access to router
+                    // For now just focusing the window is good
                 };
             } catch (e) {
                 console.error("Error creating notification object:", e);
             }
         };
 
-        // Listen for Auth Changes to subscribe/unsubscribe
-        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-            if (session?.user) {
-                subscribe(session.user);
-            } else {
+        // Initial Load or Auth Change
+        const init = async (user) => {
+            if (!user) {
                 if (channel) supabase.removeChannel(channel);
                 channel = null;
+                return;
             }
+
+            // 1. Subscribe to Realtime (In-App)
+            subscribe(user);
+
+            // 2. Register SW & Subscribe to Push (Background)
+            console.log("Attempting to Initialize Push...");
+            if ('serviceWorker' in navigator && 'PushManager' in window) {
+                try {
+                    // Check local storage to avoid spamming subscribe on every refresh
+                    const isPushSubscribed = localStorage.getItem('push_subscribed_user') === user.id;
+                    if (isPushSubscribed) return;
+
+                    const registration = await Promise.race([
+                        navigator.serviceWorker.ready,
+                        new Promise((_, reject) => setTimeout(() => reject(new Error("Service Worker Ready Timed Out")), 5000))
+                    ]);
+                    console.log("Service Worker Ready:", registration);
+
+                    const subscription = await registration.pushManager.subscribe({
+                        userVisibleOnly: true,
+                        applicationServerKey: 'BBZYM5uX9RvLdWH0ATTNjLVlV2Rs7tEuYWpCp-wcbyVFFDqz26hhfGytGaxH5ZqA48eIYOLWvoEaEhyFkEIkHH0'
+                    });
+
+                    console.log("Got Push Subscription:", subscription);
+
+                    // Save to Supabase
+                    const { error } = await supabase
+                        .from('push_subscriptions')
+                        .insert({
+                            user_id: user.id,
+                            subscription: subscription
+                        });
+
+                    if (!error) {
+                        console.log('Push Subscription Saved to Database ✅');
+                        localStorage.setItem('push_subscribed_user', user.id);
+                    } else {
+                        // Ignore duplicate key error, otherwise log
+                        if (error.code !== '23505') console.error('Push Save Error ❌:', error);
+                        else console.log('Push Subscription already exists in DB');
+                    }
+
+                } catch (err) {
+                    console.error('Push Registration Error ❌:', err);
+                }
+            } else {
+                console.log("Service Worker or Push Manager not supported");
+            }
+        };
+
+        const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+            init(session?.user);
         });
 
-        // Initial Load
         supabase.auth.getUser().then(({ data: { user } }) => {
-            if (user) subscribe(user);
+            if (user) init(user);
         });
 
         return () => {
