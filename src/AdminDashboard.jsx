@@ -37,6 +37,21 @@ export default function AdminDashboard() {
         checkAdmin();
     }, [navigate]);
 
+    // Fetch initial users
+    useEffect(() => {
+        const fetchInitialUsers = async () => {
+            const { data } = await supabase
+                .from('profiles')
+                .select('*')
+                .limit(50);
+            setResults(data || []);
+        };
+
+        if (adminUser) {
+            fetchInitialUsers();
+        }
+    }, [adminUser]);
+
     const handleSearch = async (e) => {
         const term = e.target.value;
         setSearchTerm(term);
@@ -46,10 +61,15 @@ export default function AdminDashboard() {
                 .from('profiles')
                 .select('*')
                 .ilike('username', `%${term}%`)
-                .limit(10);
+                .limit(50);
             setResults(data || []);
         } else {
-            setResults([]);
+            // Reset to default list if search is cleared
+            const { data } = await supabase
+                .from('profiles')
+                .select('*')
+                .limit(50);
+            setResults(data || []);
         }
     };
 
@@ -78,7 +98,7 @@ export default function AdminDashboard() {
                         <Search size={20} color="#9ca3af" style={{ marginRight: '10px' }} />
                         <input
                             type="text"
-                            placeholder="Search username to impersonate..."
+                            placeholder="Search by username..."
                             value={searchTerm}
                             onChange={handleSearch}
                             style={{ background: 'transparent', border: 'none', color: 'white', fontSize: '16px', width: '100%', outline: 'none' }}
@@ -105,16 +125,18 @@ export default function AdminDashboard() {
                                 onMouseLeave={(e) => e.currentTarget.style.borderColor = '#374151'}
                             >
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                                    <img src={user.avatar_url} style={{ width: 40, height: 40, borderRadius: '50%', objectFit: 'cover' }} />
+                                    <img src={user.avatar_url || 'https://via.placeholder.com/40'} style={{ width: 40, height: 40, borderRadius: '50%', objectFit: 'cover' }} />
                                     <div>
                                         <div style={{ fontWeight: 'bold' }}>{user.full_name}</div>
                                         <div style={{ fontSize: '13px', color: '#9ca3af' }}>@{user.username}</div>
+                                        {/* Display Email if available (Admin View) */}
+                                        <div style={{ fontSize: '11px', color: '#6b7280' }}>{user.email}</div>
                                     </div>
                                 </div>
                                 <ArrowRight size={20} color="#ef4444" />
                             </div>
                         ))}
-                        {searchTerm && results.length === 0 && (
+                        {results.length === 0 && (
                             <div style={{ textAlign: 'center', color: '#6b7280', padding: '20px' }}>No users found</div>
                         )}
                     </div>
