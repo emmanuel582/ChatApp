@@ -69,12 +69,21 @@ export default function ChatDashboard() {
     const handleUpdateProfile = async () => {
         try {
             setSaving(true);
-            const { error } = await supabase
+            const { data, error } = await supabase
                 .from('profiles')
                 .update({ full_name: fullName, updated_at: new Date() })
-                .eq('id', user.id);
+                .eq('id', user.id)
+                .select() // IMPORTANT: Return the updated data
+                .single();
 
             if (error) throw error;
+
+            // Update local state immediately with confirmed data
+            if (data) {
+                console.log("Profile updated successfully:", data);
+                setProfile(prev => ({ ...prev, ...data }));
+                setFullName(data.full_name);
+            }
 
             if (password) {
                 // Only allow password update for self, not when impersonating (unless we want admins to change user passwords)

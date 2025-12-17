@@ -1151,17 +1151,17 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                                                 color: 'white', // White text as requested
                                                 border: '2px solid #2563eb',
                                                 transform: 'scale(1.02)'
-                                            } : {})
+                                            } : {}),
+                                            userSelect: 'none', // Disable native text selection
+                                            WebkitUserSelect: 'none', // Safari support
+                                            touchAction: 'manipulation' // Improve touch handling
                                         }}
                                         onTouchStart={onTouchStart}
                                         onTouchEnd={(e) => onTouchEnd(e, msg)}
-                                        onContextMenu={(e) => handleContextMenu(e, msg)}
                                         onClick={(e) => {
-                                            if (isSelectionMode) {
-                                                e.preventDefault();
-                                                e.stopPropagation();
-                                                toggleSelection(msg.id);
-                                            }
+                                            e.stopPropagation();
+                                            e.preventDefault(); // Prevent accidental selection
+                                            handleContextMenu(e, msg);
                                         }}
                                     >
                                         {/* Quoted Message Display */}
@@ -1257,16 +1257,18 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                                     </div>
 
                                     {/* Reply Button (Right for Theirs) */}
-                                    {!isMine && !msg.is_deleted && msg.content !== 'This message was deleted' && (
-                                        <div
-                                            className="reply-btn"
-                                            onClick={() => setReplyingTo(msg)}
-                                            style={{ cursor: 'pointer', color: '#b0b0b0', padding: '0 5px' }}
-                                            title="Reply"
-                                        >
-                                            <Reply size={18} />
-                                        </div>
-                                    )}
+                                    {
+                                        !isMine && !msg.is_deleted && msg.content !== 'This message was deleted' && (
+                                            <div
+                                                className="reply-btn"
+                                                onClick={() => setReplyingTo(msg)}
+                                                style={{ cursor: 'pointer', color: '#b0b0b0', padding: '0 5px' }}
+                                                title="Reply"
+                                            >
+                                                <Reply size={18} />
+                                            </div>
+                                        )
+                                    }
                                 </div>
                             );
                         })
@@ -1455,49 +1457,51 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
             }
 
             {/* Context Menu */}
-            {contextMenu.visible && (
-                <div
-                    ref={contextMenuRef}
-                    style={{
-                        position: 'fixed',
-                        top: contextMenu.y,
-                        left: contextMenu.x,
-                        background: '#1f2937',
-                        color: 'white',
-                        borderRadius: '12px',
-                        padding: '8px',
-                        zIndex: 9999,
-                        minWidth: '200px',
-                        boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
-                        display: 'flex',
-                        flexDirection: 'column',
-                        gap: '4px'
-                    }}
-                >
-                    <div onClick={() => performAction('select')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                        <CheckSquare size={16} /> <span>Select</span>
-                    </div>
-                    <div onClick={() => performAction('reply')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                        <Reply size={16} /> <span>Reply</span>
-                    </div>
-                    <div onClick={() => performAction('copy')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                        <Copy size={16} /> <span>Copy</span>
-                    </div>
-
-                    {/* Delete Options */}
-                    <div style={{ height: '1px', background: 'rgba(255,255,255,0.1)', margin: '4px 0' }}></div>
-
-                    <div onClick={() => performAction('delete', 'me')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px', color: '#ef4444' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                        <Trash2 size={16} /> <span>Delete for Me</span>
-                    </div>
-
-                    {contextMenu.message?.sender_id === currentUser.id && (
-                        <div onClick={() => performAction('delete', 'everyone')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px', color: '#ef4444' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
-                            <Trash2 size={16} /> <span>Delete for Everyone</span>
+            {
+                contextMenu.visible && (
+                    <div
+                        ref={contextMenuRef}
+                        style={{
+                            position: 'fixed',
+                            top: contextMenu.y,
+                            left: contextMenu.x,
+                            background: '#1f2937',
+                            color: 'white',
+                            borderRadius: '12px',
+                            padding: '8px',
+                            zIndex: 9999,
+                            minWidth: '200px',
+                            boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
+                            display: 'flex',
+                            flexDirection: 'column',
+                            gap: '4px'
+                        }}
+                    >
+                        <div onClick={() => performAction('select')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                            <CheckSquare size={16} /> <span>Select</span>
                         </div>
-                    )}
-                </div>
-            )}
+                        <div onClick={() => performAction('reply')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                            <Reply size={16} /> <span>Reply</span>
+                        </div>
+                        <div onClick={() => performAction('copy')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                            <Copy size={16} /> <span>Copy</span>
+                        </div>
+
+                        {/* Delete Options */}
+                        <div style={{ height: '1px', background: 'rgba(255,255,255,0.1)', margin: '4px 0' }}></div>
+
+                        <div onClick={() => performAction('delete', 'me')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px', color: '#ef4444' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                            <Trash2 size={16} /> <span>Delete for Me</span>
+                        </div>
+
+                        {contextMenu.message?.sender_id === currentUser.id && (
+                            <div onClick={() => performAction('delete', 'everyone')} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '10px', cursor: 'pointer', borderRadius: '6px', color: '#ef4444' }} onMouseEnter={e => e.currentTarget.style.background = 'rgba(239, 68, 68, 0.1)'} onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                                <Trash2 size={16} /> <span>Delete for Everyone</span>
+                            </div>
+                        )}
+                    </div>
+                )
+            }
         </div >
     );
 }
