@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
 import {
     Menu,
     MoreVertical,
@@ -23,10 +23,96 @@ import {
     Clipboard,
     CheckSquare,
     Lock,
+    StopCircle,
+    Play,
+    Pause
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from './supabaseClient';
 import EmojiPicker, { Theme } from 'emoji-picker-react';
+import WaveSurfer from 'wavesurfer.js';
+
+// Voice Message Component
+const VoiceMessage = ({ audioUrl, isMe }) => {
+    const waveformRef = useRef(null);
+    const wavesurfer = useRef(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [duration, setDuration] = useState(0);
+    const [currentTime, setCurrentTime] = useState(0);
+
+    useEffect(() => {
+        if (waveformRef.current) {
+            wavesurfer.current = WaveSurfer.create({
+                container: waveformRef.current,
+                waveColor: isMe ? '#93c5fd' : '#b0b0b0',
+                progressColor: isMe ? 'white' : '#357abd',
+                cursorColor: 'transparent',
+                barWidth: 2,
+                barRadius: 3,
+                responsive: true,
+                height: 30,
+                url: audioUrl
+            });
+
+            wavesurfer.current.on('ready', () => {
+                setDuration(wavesurfer.current.getDuration());
+            });
+
+            wavesurfer.current.on('finish', () => {
+                setIsPlaying(false);
+            });
+
+            wavesurfer.current.on('audioprocess', () => {
+                setCurrentTime(wavesurfer.current.getCurrentTime());
+            });
+
+            return () => {
+                wavesurfer.current.destroy();
+            };
+        }
+    }, [audioUrl, isMe]);
+
+    const togglePlay = (e) => {
+        e.stopPropagation();
+        if (wavesurfer.current) {
+            wavesurfer.current.playPause();
+            setIsPlaying(wavesurfer.current.isPlaying());
+        }
+    };
+
+    const formatTime = (time) => {
+        const minutes = Math.floor(time / 60);
+        const seconds = Math.floor(time % 60);
+        return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
+    };
+
+    return (
+        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', minWidth: '200px', padding: '5px 0' }}>
+            <div
+                onClick={togglePlay}
+                style={{
+                    cursor: 'pointer',
+                    background: isMe ? 'rgba(255,255,255,0.2)' : '#e0e0e0',
+                    borderRadius: '50%',
+                    width: '35px',
+                    height: '35px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    flexShrink: 0
+                }}
+            >
+                {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
+            </div>
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                <div ref={waveformRef} style={{ width: '100%' }} />
+                <div style={{ fontSize: '10px', opacity: 0.8, alignSelf: 'flex-end', marginTop: '-5px' }}>
+                    {isPlaying ? formatTime(currentTime) : formatTime(duration)}
+                </div>
+            </div>
+        </div>
+    );
+};
 
 export default function ChatScreen({ recipientId, impersonatedUser = null, isGhostMode = false }) {
     const navigate = useNavigate();
@@ -130,6 +216,81 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
             document.removeEventListener('mousedown', handleClickOutside);
         };
     }, []);
+
+    // State for Voice Recording
+    const [isRecording, setIsRecording] = useState(false);
+    const [recordingDuration, setRecordingDuration] = useState(0);
+    const mediaRecorderRef = useRef(null);
+    const audioChunksRef = useRef([]);
+    const recordingTimerRef = useRef(null);
+
+    const startRecording = async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const mediaRecorder = new MediaRecorder(stream);
+            mediaRecorderRef.current = mediaRecorder;
+            audioChunksRef.current = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    audioChunksRef.current.push(event.data);
+                }
+            };
+
+            mediaRecorder.start();
+            setIsRecording(true);
+            setRecordingDuration(0);
+
+            recordingTimerRef.current = setInterval(() => {
+                setRecordingDuration(prev => prev + 1);
+            }, 1000);
+
+        } catch (err) {
+            console.error('Error accessing microphone:', err);
+            alert('Cannot access microphone. Please allow permissions.');
+        }
+    };
+
+    const stopRecording = async (send = true) => {
+        if (mediaRecorderRef.current && isRecording) {
+            mediaRecorderRef.current.stop();
+            mediaRecorderRef.current.onstop = async () => {
+                if (recordingTimerRef.current) clearInterval(recordingTimerRef.current);
+                setIsRecording(false);
+                setRecordingDuration(0);
+
+                const stream = mediaRecorderRef.current.stream;
+                stream.getTracks().forEach(track => track.stop()); // Turn off mic
+
+                if (send) {
+                    const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
+                    await uploadVoiceNote(audioBlob);
+                }
+            };
+        }
+    };
+
+    const cancelRecording = () => {
+        stopRecording(false);
+    };
+
+    const uploadVoiceNote = async (audioBlob) => {
+        try {
+            const fileName = `${currentUser.id}/${Date.now()}.webm`;
+            const { error: uploadError } = await supabase.storage
+                .from('chat-attachments')
+                .upload(fileName, audioBlob);
+
+            if (uploadError) throw uploadError;
+
+            const { data } = supabase.storage.from('chat-attachments').getPublicUrl(fileName);
+            handleSendMessage(data.publicUrl, 'audio');
+
+        } catch (error) {
+            console.error('Error uploading voice note:', error);
+            alert('Failed to send voice note');
+        }
+    };
 
     // Selection Handlers
     const toggleSelection = (messageId) => {
@@ -1215,6 +1376,8 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                                                     <span style={{ fontSize: '11px', opacity: 0.8 }}>Click to preview</span>
                                                 </div>
                                             </div>
+                                        ) : msg.type === 'audio' ? (
+                                            <VoiceMessage audioUrl={msg.content} isMe={isMine} />
                                         ) : (
                                             <span>{msg.content}</span>
                                         )}
@@ -1361,7 +1524,7 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                     {newMessage.trim() ? (
                         <Send size={22} color="#357abd" style={{ cursor: 'pointer' }} onClick={() => handleSendMessage(newMessage, 'text')} />
                     ) : (
-                        <Mic size={22} color="#999" style={{ cursor: 'pointer' }} />
+                        <Mic size={22} color="#999" style={{ cursor: 'pointer' }} onClick={startRecording} />
                     )}
                 </div>
             </div>
@@ -1412,12 +1575,7 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                         }}
                         onClick={() => setPreviewImage(null)}
                     >
-                        <style>{`
-                        @keyframes fadeIn {
-                            from { opacity: 0; }
-                            to { opacity: 1; }
-                        }
-                    `}</style>
+                        {/* ... (keep preview content) ... */}
                         <div style={{ position: 'relative', maxWidth: '90%', maxHeight: '80%' }}>
                             <img
                                 src={previewImage}
@@ -1455,6 +1613,43 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                     </div>
                 )
             }
+
+            {/* Recording Overlay */}
+            {isRecording && (
+                <div style={{
+                    position: 'absolute',
+                    bottom: '80px',
+                    left: '50%',
+                    transform: 'translateX(-50%)',
+                    background: '#1f2937',
+                    padding: '10px 20px',
+                    borderRadius: '50px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '20px',
+                    boxShadow: '0 4px 15px rgba(0,0,0,0.3)',
+                    zIndex: 1000,
+                    minWidth: '220px',
+                    justifyContent: 'space-between',
+                    border: '1px solid rgba(255,255,255,0.1)'
+                }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                        <div style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#ef4444', animation: 'pulse 1s infinite' }}></div>
+                        <span style={{ color: 'white', fontWeight: 'bold' }}>
+                            {Math.floor(recordingDuration / 60)}:{(recordingDuration % 60).toString().padStart(2, '0')}
+                        </span>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
+                        <div onClick={cancelRecording} style={{ cursor: 'pointer', color: '#ef4444' }}>
+                            <Trash2 size={24} />
+                        </div>
+                        <div onClick={() => stopRecording(true)} style={{ cursor: 'pointer', color: '#3b82f6' }}>
+                            <Send size={24} />
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {/* Context Menu */}
             {
