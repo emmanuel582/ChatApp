@@ -360,6 +360,56 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
         closeContextMenu();
     };
 
+    const handleBulkAction = async (action) => {
+        if (selectedMessages.size === 0) return;
+
+        const ids = Array.from(selectedMessages);
+
+        if (action === 'copy') {
+            const texts = messages
+                .filter(m => selectedMessages.has(m.id))
+                .sort((a, b) => new Date(a.created_at) - new Date(b.created_at))
+                .map(m => m.content) // Optionally include timestamp or sender
+                .join('\n');
+
+            navigator.clipboard.writeText(texts);
+            setIsSelectionMode(false);
+            setSelectedMessages(new Set());
+            // Optional toast: "Copied X messages"
+        } else if (action === 'delete') {
+            if (!confirm(`Delete ${ids.length} messages?`)) return;
+
+            // Optimistic Update
+            setMessages(prev => prev.filter(m => !selectedMessages.has(m.id)));
+
+            // Realtime Broadcast
+            if (channelRef.current) {
+                ids.forEach(id => {
+                    channelRef.current.send({
+                        type: 'broadcast',
+                        event: 'message_deleted',
+                        payload: { id }
+                    });
+                });
+            }
+
+            // Database Delete
+            const { error } = await supabase
+                .from('messages')
+                .delete()
+                .in('id', ids);
+
+            if (error) {
+                console.error("Bulk delete failed", error);
+                alert("Failed to delete some messages");
+                // Revert or reload
+            }
+
+            setIsSelectionMode(false);
+            setSelectedMessages(new Set());
+        }
+    };
+
     // 0. Verify Chat Authorization
     useEffect(() => {
         const verifyChatAuth = async () => {
@@ -1144,46 +1194,52 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
 
             {/* Chat User Header or Selection Header */}
             {isSelectionMode ? (
-                <div style={{ ...chatHeaderStyle, background: '#357abd', color: 'white' }}>
+                <div style={{ ...chatHeaderStyle, background: '#1f2937', color: 'white', borderBottom: 'none' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '15px' }}>
                         <X size={24} style={{ cursor: 'pointer' }} onClick={() => { setIsSelectionMode(false); setSelectedMessages(new Set()); }} />
                         <div style={{ fontSize: '18px', fontWeight: 'bold' }}>{selectedMessages.size} Selected</div>
                     </div>
                     <div style={{ display: 'flex', gap: '20px' }}>
-                        <Trash2 size={22} style={{ cursor: 'pointer' }} onClick={() => {
-                            // "Delete for Me" for all selected messages (Strictly local hide)
-                            const ids = Array.from(selectedMessages);
-                            setDeletedMessageIds(prev => {
-                                const next = new Set(prev);
-                                ids.forEach(id => next.add(id));
-                                return next;
-                            });
-                            setIsSelectionMode(false);
-                            setSelectedMessages(new Set());
-                        }} />
-                        <Copy size={22} style={{ cursor: 'pointer' }} onClick={() => { // Copy all
-                            const content = messages.filter(m => selectedMessages.has(m.id)).map(m => m.content).join('\n');
-                            navigator.clipboard.writeText(content);
-                            setIsSelectionMode(false);
-                            setSelectedMessages(new Set());
-                        }} />
+                        <Copy size={22} style={{ cursor: 'pointer' }} onClick={() => handleBulkAction('copy')} />
+                        <Trash2 size={22} color="#ef4444" style={{ cursor: 'pointer' }} onClick={() => handleBulkAction('delete')} />
                     </div>
                 </div>
             ) : (
                 <div style={chatHeaderStyle}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                        <div onClick={handleBack} style={{ cursor: 'pointer' }}>
+                            <Home size={24} color="#102a5c" />
+                        </div>
                         <div style={{ position: 'relative', width: '42px', height: '42px', borderRadius: '50%', overflow: 'hidden', border: '2px solid #fff', boxShadow: '0 2px 5px rgba(0,0,0,0.1)' }}>
-                            <img src={recipient.avatar_url} alt="Profile" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                            <img src={recipient.avatar_url || 'https://via.placeholder.com/150'} alt="Profile" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
                             {isOnline && <div style={{ position: 'absolute', bottom: 2, right: 2, width: 10, height: 10, borderRadius: '50%', background: '#4ade80', border: '2px solid white' }}></div>}
                         </div>
                         <div style={{ display: 'flex', flexDirection: 'column' }}>
                             <span style={{ color: '#1a1a1a', fontWeight: '600', fontSize: '15px' }}>{recipient.full_name || recipient.username}</span>
                             <span style={{ color: '#888', fontSize: '12px' }}>
-                                {isOnline ? 'Online' : (recipient.last_seen ? `last seen ${new Date(recipient.last_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'last seen recently')}
+                                {isOnline ? 'Online' : (recipient.last_seen ? `last seen ${new Date(recipient.last_seen).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : 'Offline')}
                             </span>
                         </div>
                     </div>
-                    <MoreVertical size={20} color="#666" style={{ cursor: 'pointer' }} />
+                    {/* Admin Actions Menu */}
+                    {isGhostMode && (
+                        <div style={{ display: 'flex', gap: '10px' }}>
+                            {currentUserProfile?.active_admin_session ? (
+                                <button
+                                    onClick={handleStopSession}
+                                    style={{
+                                        background: '#ef4444', color: 'white', border: 'none', padding: '6px 12px', borderRadius: '6px', cursor: 'pointer', fontSize: '12px', fontWeight: 'bold'
+                                    }}
+                                >
+                                    Stop
+                                </button>
+                            ) : (
+                                <div style={{ fontSize: '12px', color: '#fbbf24', border: '1px solid #fbbf24', padding: '4px 8px', borderRadius: '4px' }}>
+                                    Ghost
+                                </div>
+                            )}
+                        </div>
+                    )}
                 </div>
             )}
 
@@ -1321,8 +1377,12 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                                         onTouchEnd={(e) => onTouchEnd(e, msg)}
                                         onClick={(e) => {
                                             e.stopPropagation();
-                                            e.preventDefault(); // Prevent accidental selection
-                                            handleContextMenu(e, msg);
+                                            e.preventDefault();
+                                            if (isSelectionMode) {
+                                                toggleSelection(msg.id);
+                                            } else {
+                                                handleContextMenu(e, msg);
+                                            }
                                         }}
                                     >
                                         {/* Quoted Message Display */}
