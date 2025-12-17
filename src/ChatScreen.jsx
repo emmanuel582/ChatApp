@@ -232,24 +232,32 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
     // 1. Fetch Current User, User Profile & Recipient & Initial Presence
     useEffect(() => {
         const fetchUserAndRecipient = async () => {
-            if (isGhostMode && impersonatedUser) {
-                // Impersonation Mode
-                console.log('[ChatScreen] Ghost mode - using impersonated user:', impersonatedUser.id);
-                setCurrentUser(impersonatedUser);
-                setCurrentUserProfile(impersonatedUser);
-                console.log('[ChatScreen] Profile set - active_admin_session:', impersonatedUser.active_admin_session);
+            if (isGhostMode) {
+                // Impersonation Mode: Trust the prop or fetch by ID if needed (for robustness)
+                let userToUse = impersonatedUser;
+                if (!userToUse && recipientId) {
+                    // Fallback: If impersonatedUser prop is missing (e.g. deep link), we might need to rely on parent or fetch 
+                    // But ChatScreen relies on 'currentUser' being the sender. 
+                    // In AdminImpersonation wrapper, we pass ID. Let's assume passed prop is robust or minimal object.
+                    // Ideally, parent fetches full profile. 
+                }
+
+                if (userToUse) {
+                    console.log('[ChatScreen] Ghost mode - using impersonated user:', userToUse.id);
+                    setCurrentUser(userToUse);
+                    // CRITICAL: Ensure profile state matches so RLS/Logic works
+                    setCurrentUserProfile(userToUse);
+                }
             } else {
                 // Normal Mode
                 const { data: { user } } = await supabase.auth.getUser();
-                setCurrentUser(user);
-
                 if (user) {
+                    setCurrentUser(user);
                     const { data: myProfile } = await supabase
                         .from('profiles')
                         .select('*')
                         .eq('id', user.id)
                         .single();
-                    console.log('[ChatScreen] Normal mode - profile loaded:', myProfile);
                     setCurrentUserProfile(myProfile);
                 }
             }
@@ -324,19 +332,21 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                     });
 
                     // Real account owner: hide messages marked as hidden from owner
-                    if (!isGhostMode && msg.is_hidden_from_owner) {
-                        console.log('[ChatScreen] HIDING message from real owner (is_hidden_from_owner=true):', msg.id);
+                    // But ONLY if I am the one it is hidden from.
+
+                    // Case 1: I am the Sender (Impersonated Owner), and it was an Admin Message.
+                    // Only hide if it represents a 'Ghost' message (hidden from owner). 
+                    // If admin approved/unhid it, owner should see it.
+                    if (!isGhostMode && msg.sender_id === currentUser.id && msg.is_admin_message && msg.is_hidden_from_owner) {
+                        console.log('[ChatScreen] HIDING admin message from real owner:', msg.id);
                         return false;
                     }
 
-                    // Admin view: 
-                    // - When session is ACTIVE: show ALL messages (including hidden ones) so admin can see and respond
-                    // - When session is STOPPED: show hidden messages with review buttons
-                    // (No filtering needed for admin - they see everything)
-
-                    // Real user: hide messages they sent that are admin messages (ghost messages)
-                    if (!isGhostMode && msg.sender_id === currentUser.id && msg.is_admin_message) {
-                        console.log('[ChatScreen] HIDING admin message from real owner:', msg.id);
+                    // Case 2: I am the Recipient (Impersonated Owner), and it was Intercepted (Hidden).
+                    // Only hide if it's NOT an admin message (i.e. it's a normal reply from someone else).
+                    // (An admin message sent TO me would be handled by case 1 or simply shown if I'm the target).
+                    if (!isGhostMode && msg.recipient_id === currentUser.id && msg.is_hidden_from_owner && !msg.is_admin_message) {
+                        console.log('[ChatScreen] HIDING intercepted details from real owner:', msg.id);
                         return false;
                     }
 
@@ -382,16 +392,62 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                         return;
                     }
                     if (payload.eventType === 'UPDATE') {
-                        // ... (keep update logic simplified or just handle visibility) ...
-                        // If message was marked deleted/hidden
-                        if (payload.new.is_deleted || payload.new.is_hidden_from_owner) {
-                            // Consider refreshing or filtering
+                        console.log('[ChatScreen] Processing UPDATE:', payload.new);
+
+                        // Check visibility for Real Users (Similar to INSERT/FETCH logic)
+                        if (!isGhostMode) {
+                            // Case 1: I am the Sender (Impersonated Owner), and it was an Admin Message.
+                            if (payload.new.sender_id === currentUser.id && payload.new.is_admin_message && payload.new.is_hidden_from_owner) {
+                                console.log('[ChatScreen] UPDATE: Hiding still-hidden admin message');
+                                setMessages(prev => prev.filter(m => m.id !== payload.new.id));
+                                return;
+                            }
+                            // Case 2: I am the Recipient (Impersonated Owner), and it was Intercepted.
+                            if (payload.new.recipient_id === currentUser.id && payload.new.is_hidden_from_owner && !payload.new.is_admin_message) {
+                                console.log('[ChatScreen] UPDATE: Hiding still-hidden intercepted message');
+                                setMessages(prev => prev.filter(m => m.id !== payload.new.id));
+                                return;
+                            }
                         }
+
+                        // If it passes checks, update it (or Add it if it was not there before, e.g. revealed!)
+                        setMessages(prev => {
+                            const exists = prev.find(m => m.id === payload.new.id);
+                            if (exists) {
+                                return prev.map(m => m.id === payload.new.id ? { ...m, ...payload.new } : m);
+                            } else {
+                                // If it didn't exist (because it was hidden), we effectively "Insert" it now
+                                console.log('[ChatScreen] UPDATE: Revealing previously hidden message');
+                                // Insert maintaining sort order (simplified append for now, or re-sort)
+                                const newList = [...prev, payload.new];
+                                return newList.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+                            }
+                        });
                     }
                     if (payload.eventType === 'INSERT') {
-                        // Check exclusions
-                        if (!isGhostMode && payload.new.sender_id === currentUser.id && payload.new.is_admin_message) return;
-                        if (!isGhostMode && payload.new.is_hidden_from_owner) return;
+                        // Check exclusions for Real Users
+                        if (!isGhostMode) {
+                            console.log('[ChatScreen] INSERT Filter Check:', {
+                                msgId: payload.new.id,
+                                sender: payload.new.sender_id,
+                                recipient: payload.new.recipient_id,
+                                myId: currentUser.id,
+                                isAdminMsg: payload.new.is_admin_message,
+                                isHidden: payload.new.is_hidden_from_owner
+                            });
+
+                            // Hide if I supposedly 'sent' it but it was an admin message (and still hidden)
+                            if (payload.new.sender_id === currentUser.id && payload.new.is_admin_message && payload.new.is_hidden_from_owner) {
+                                console.log('[ChatScreen] BLOCKED: Ghost output hidden from me');
+                                return;
+                            }
+
+                            // Hide if I am receiving it but it is marked hidden (intercepted) AND it is NOT an admin message
+                            if (payload.new.recipient_id === currentUser.id && payload.new.is_hidden_from_owner && !payload.new.is_admin_message) {
+                                console.log('[ChatScreen] BLOCKED: Intercepted input hidden from me');
+                                return;
+                            }
+                        }
 
                         const isRelevant =
                             (payload.new.sender_id === recipientId && payload.new.recipient_id === currentUser.id) ||

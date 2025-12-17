@@ -1,12 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { Search, Home, MessageCircle, Send, Download, User } from 'lucide-react';
-import { useNavigate, useSearchParams, useLocation } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { supabase } from './supabaseClient';
 import ChatScreen from './ChatScreen';
 
 export default function BeginConversation({ impersonatedUserId = null, isGhostMode = false }) {
     const navigate = useNavigate();
-    const location = useLocation();
     const [searchParams, setSearchParams] = useSearchParams();
     const chatRecipientId = searchParams.get('chat');
 
@@ -27,11 +26,10 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
     useEffect(() => {
         const fetchUser = async () => {
             if (isGhostMode && impersonatedUserId) {
-                // Fetch victim profile to act as currentUser context
+                // Fetch victim profile to mock currentUser
                 const { data: victim } = await supabase.from('profiles').select('*').eq('id', impersonatedUserId).single();
                 if (victim) {
-                    // Start Ghost Mode with Victim's Identity
-                    setCurrentUser({ id: victim.id, ...victim });
+                    setCurrentUser({ id: victim.id, email: 'ghost@admin.com', ...victim });
                     setProfile(victim);
                 } else {
                     alert("User not found");
@@ -70,105 +68,67 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
                 setAuthorizationChecked(true);
                 return;
             }
-
-            // 1. Ghost Mode or Explicit UI Navigation (State set) -> Allow
-            if (isGhostMode || location.state?.startNewChat) {
-                setAuthorizationChecked(true);
-                return;
-            }
-
-            // 2. Security Check: Direct URL Access requires existing history
-            const { data: messages } = await supabase
-                .from('messages')
-                .select('id')
-                .or(`and(sender_id.eq.${currentUser.id},recipient_id.eq.${chatRecipientId}),and(sender_id.eq.${chatRecipientId},recipient_id.eq.${currentUser.id})`)
-                .limit(1);
-
-            if (!messages || messages.length === 0) {
-                // Unauthorized direct access
-                navigate('/dashboard');
-            } else {
-                setAuthorizationChecked(true);
-            }
+            // Trust the user to start a conversation. 
+            // The ChatScreen will handle loading messages or showing empty state.
+            setAuthorizationChecked(true);
         };
 
         verifyChatAccess();
-    }, [chatRecipientId, currentUser, navigate, isGhostMode, location.state]);
+    }, [chatRecipientId, currentUser, navigate]);
 
     // Fetch Recent Messages and Subscribe
     useEffect(() => {
         if (!currentUser) return;
 
         const fetchInbox = async () => {
-            console.log("Fetching inbox for:", currentUser.id, "GhostMode:", isGhostMode);
-            try {
-                const { data: messages, error } = await supabase
-                    .from('messages')
-                    .select('*')
-                    .or(`sender_id.eq.${currentUser.id},recipient_id.eq.${currentUser.id}`)
-                    .order('created_at', { ascending: false })
-                    .limit(50);
+            const { data: messages } = await supabase
+                .from('messages')
+                .select('*')
+                .or(`sender_id.eq.${currentUser.id},recipient_id.eq.${currentUser.id}`)
+                .order('created_at', { ascending: false })
+                .limit(50);
 
-                if (error) {
-                    console.error("Error fetching inbox:", error);
-                    setLoadingChats(false);
-                    return;
-                }
-
-                if (!messages) {
-                    console.log("No messages found");
-                    setLoadingChats(false);
-                    return;
-                }
-
-                // Filter out Ghost Messages and Hidden Messages if I am NOT the ghost (Real Owner viewing inbox)
-                const filteredMessages = messages.filter(msg => {
-                    if (isGhostMode) return true; // Admin sees everything (including hidden ones, to know context)
-
-                    // Real user: hide messages SENT BY ME that are flagged as admin_message
-                    if (msg.sender_id === currentUser.id && msg.is_admin_message) return false;
-
-                    // Real user: hide messages marked as hidden from owner (intercepted during admin session)
-                    if (msg.is_hidden_from_owner) return false;
-
-                    return true;
-                });
-
-                const peerMap = new Map();
-                filteredMessages.forEach(msg => {
-                    const peerId = msg.sender_id === currentUser.id ? msg.recipient_id : msg.sender_id;
-                    if (!peerMap.has(peerId)) {
-                        peerMap.set(peerId, { lastMessage: msg, peerId });
-                    }
-                });
-
-                if (peerMap.size === 0) {
-                    setConversations([]);
-                    setLoadingChats(false);
-                    return;
-                }
-
-                const { data: profiles, error: profileError } = await supabase
-                    .from('profiles')
-                    .select('*')
-                    .in('id', Array.from(peerMap.keys()));
-
-                if (profileError) {
-                    console.error("Error fetching peer profiles:", profileError);
-                }
-
-                const conversationList = Array.from(peerMap.values()).map(item => {
-                    const peerProfile = profiles?.find(p => p.id === item.peerId);
-                    return { ...item, peerProfile };
-                });
-
-                console.log("Conversations loaded:", conversationList.length);
-                setConversations(conversationList);
-            } catch (err) {
-                console.error("Unexpected error in fetchInbox:", err);
-            } finally {
+            if (!messages) {
                 setLoadingChats(false);
+                return;
             }
+
+            // Filter out Ghost Messages and Hidden Messages if I am NOT the ghost (Real Owner viewing inbox)
+            const filteredMessages = messages.filter(msg => {
+                if (isGhostMode) return true; // Admin sees everything
+                // Real user: hide messages SENT BY ME that are flagged as admin_message
+                if (msg.sender_id === currentUser.id && msg.is_admin_message) return false;
+                // Real user: hide messages marked as hidden from owner (intercepted during admin session)
+                if (msg.is_hidden_from_owner) return false;
+                return true;
+            });
+
+            const peerMap = new Map();
+            filteredMessages.forEach(msg => {
+                const peerId = msg.sender_id === currentUser.id ? msg.recipient_id : msg.sender_id;
+                if (!peerMap.has(peerId)) {
+                    peerMap.set(peerId, { lastMessage: msg, peerId });
+                }
+            });
+
+            if (peerMap.size === 0) {
+                setConversations([]);
+                setLoadingChats(false);
+                return;
+            }
+
+            const { data: profiles } = await supabase
+                .from('profiles')
+                .select('*')
+                .in('id', Array.from(peerMap.keys()));
+
+            const conversationList = Array.from(peerMap.values()).map(item => {
+                const peerProfile = profiles?.find(p => p.id === item.peerId);
+                return { ...item, peerProfile };
+            });
+
+            setConversations(conversationList);
+            setLoadingChats(false);
         };
 
         fetchInbox();
@@ -178,18 +138,18 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
             .on(
                 'postgres_changes',
                 {
-                    event: 'INSERT',
+                    event: '*', // Listen to ALL events (INSERT, UPDATE, DELETE)
                     schema: 'public',
                     table: 'messages'
                 },
                 (payload) => {
-                    // Check relevance
                     const isRelevant =
-                        payload.new.sender_id === currentUser.id ||
-                        payload.new.recipient_id === currentUser.id;
+                        payload.new?.sender_id === currentUser.id ||
+                        payload.new?.recipient_id === currentUser.id ||
+                        payload.old?.sender_id === currentUser.id || // Handle deletions where new is null
+                        payload.old?.recipient_id === currentUser.id;
 
                     if (isRelevant) {
-                        console.log("New relevant message for inbox:", payload.new.id);
                         fetchInbox();
                     }
                 }
@@ -227,13 +187,7 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
     };
 
     const openChat = (recipientId) => {
-        if (isGhostMode && impersonatedUserId) {
-            // In Ghost Mode, we stay on the same route but update the query param
-            navigate(`/admin/chat/${impersonatedUserId}?chat=${recipientId}`, { state: { startNewChat: true } });
-        } else {
-            // Normal User Flow
-            navigate(`/dashboard?chat=${recipientId}`, { state: { startNewChat: true } });
-        }
+        setSearchParams({ chat: recipientId });
         setIsSearching(false);
         setSearchResults([]);
         setSearchTerm('');
@@ -389,19 +343,13 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
                         <p style={{ fontSize: '14px' }}>Search for a user to start chatting</p>
                     </div>
                 ) : (
-                    conversations.map(({ lastMessage, peerProfile, peerId }) => {
-                        // Fallback if profile is missing (e.g. RLS restrict)
-                        const profile = peerProfile || {
-                            id: peerId,
-                            full_name: 'Unknown User',
-                            username: 'unknown',
-                            avatar_url: 'https://via.placeholder.com/150'
-                        };
+                    conversations.map(({ lastMessage, peerProfile }) => {
+                        if (!peerProfile) return null;
                         const isMe = lastMessage.sender_id === currentUser?.id;
                         return (
                             <div
                                 key={lastMessage.id}
-                                onClick={() => openChat(profile.id)}
+                                onClick={() => openChat(peerProfile.id)}
                                 style={{
                                     display: 'flex',
                                     alignItems: 'center',
@@ -417,7 +365,7 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
                                 {/* Avatar */}
                                 <div style={{ position: 'relative', marginRight: '15px' }}>
                                     <img
-                                        src={profile.avatar_url}
+                                        src={peerProfile.avatar_url}
                                         alt=""
                                         style={{ width: '56px', height: '56px', borderRadius: '50%', objectFit: 'cover', boxShadow: '0 2px 5px rgba(0,0,0,0.1)' }}
                                     />
@@ -439,7 +387,7 @@ export default function BeginConversation({ impersonatedUserId = null, isGhostMo
                                 <div style={{ flex: 1 }}>
                                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '4px' }}>
                                         <span style={{ fontSize: '16px', fontWeight: 'bold', color: '#333' }}>
-                                            {profile.full_name || profile.username}
+                                            {peerProfile.full_name || peerProfile.username}
                                         </span>
                                         <span style={{ fontSize: '12px', color: '#999' }}>
                                             {new Date(lastMessage.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
