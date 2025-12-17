@@ -3,9 +3,17 @@ import { supabase } from './supabaseClient';
 
 export default function NotificationListener() {
     useEffect(() => {
-        // Request permission on mount
+        // Explicitly request permission if not already granted or denied
         if (Notification.permission === 'default') {
-            Notification.requestPermission();
+            const askPermission = async () => {
+                const permission = await Notification.requestPermission();
+                console.log('Notification permission:', permission);
+                if (permission === 'granted') {
+                    // Test notification
+                    new Notification("Notifications Enabled", { body: "You will now receive alerts for new messages." });
+                }
+            };
+            askPermission();
         }
 
         let channel = null;
@@ -16,8 +24,10 @@ export default function NotificationListener() {
             // Clean up existing subscription if any
             if (channel) await supabase.removeChannel(channel);
 
+            console.log("Subscribing to notifications for user:", user.id);
+
             channel = supabase
-                .channel(`notifications:${user.id}`)
+                .channel(`notifications:global:${user.id}`)
                 .on(
                     'postgres_changes',
                     {
@@ -27,38 +37,56 @@ export default function NotificationListener() {
                         filter: `recipient_id=eq.${user.id}`
                     },
                     (payload) => {
+                        console.log("New message received in background listener:", payload.new);
                         handleNewMessage(payload.new);
                     }
                 )
-                .subscribe();
+                .subscribe((status) => {
+                    console.log("Notification subscription status:", status);
+                });
         };
 
         const handleNewMessage = async (msg) => {
             // 1. If tab is hidden (minimized or background tab), definitely notify
             if (document.hidden) {
+                console.log("Document hidden, showing notification.");
                 showNotification(msg);
                 return;
             }
 
-            // 2. If tab is visible, check if we are currently looking at this chat
-            // Check query param used in BeginConversation
+            // 2. If tab is visible, we still check URL path
+            // The user might be on the dashboard but reading a totally different chat.
+            // We need to be careful: URL might be /dashboard?chat=ID or /admin/chat/ID
+            // Let's parse robustly.
             const params = new URLSearchParams(window.location.search);
-            const currentChatId = params.get('chat');
-            const path = window.location.pathname;
+            const currentChatId = params.get('chat'); // User mode
+            const path = window.location.pathname;    // Admin mode usually /admin/chat/ID or /chat/ID
 
-            // Assumption: User is "chatting with sender" if they are on /dashboard AND the chat param matches sender
-            const isChattingWithSender = (path === '/dashboard' || path.startsWith('/admin/chat')) && currentChatId === msg.sender_id;
+            // Extract ID from path for admin mode
+            const pathParts = path.split('/');
+            const adminChatId = path.includes('/chat/') ? pathParts[pathParts.length - 1] : null;
+
+            const activeChatId = currentChatId || adminChatId;
+
+            console.log("Active Chat ID:", activeChatId, "Incoming Sender:", msg.sender_id);
+
+            const isChattingWithSender = activeChatId === msg.sender_id;
 
             if (!isChattingWithSender) {
+                console.log("User is active but on different chat (or no chat), showing notification.");
                 showNotification(msg);
+            } else {
+                console.log("User is currently chatting with sender, suppressing notification.");
             }
         };
 
         const showNotification = async (msg) => {
-            if (Notification.permission !== 'granted') return;
+            if (Notification.permission !== 'granted') {
+                console.warn("Notifications strictly not granted.");
+                return;
+            }
 
             // Fetch sender info for a better title
-            // We use maybeSingle to avoid errors if user deleted/ghost
             const { data } = await supabase
                 .from('profiles')
                 .select('full_name, username')
@@ -66,20 +94,27 @@ export default function NotificationListener() {
                 .maybeSingle();
 
             const senderName = data ? (data.full_name || data.username) : 'New Message';
+            const title = `New message from ${senderName}`;
+            const body = msg.type === 'image' ? 'Sent a photo' : (msg.type === 'audio' ? 'Sent a voice note' : msg.content);
 
-            // Create notification
-            const notification = new Notification(senderName, {
-                body: msg.content || 'Sent a photo',
-                icon: '/vite.svg', // Fallback icon
-                tag: msg.sender_id, // Group updates from same sender
-                requireInteraction: false // Don't keep it open forever
-            });
+            try {
+                const notification = new Notification(title, {
+                    body: body,
+                    icon: '/vite.svg',
+                    tag: 'message-notification', // Overwrite old if needed, or unique per sender? 
+                    // Let's use unique tag per sender so they stack if from different people, but replace if same person
+                    tag: `msg-${msg.sender_id}`,
+                    renotify: true, // Vibrate/sound again even if replacing
+                    requireInteraction: false
+                });
 
-            notification.onclick = () => {
-                window.focus();
-                // We could try to navigate to the chat, but that requires access to router
-                // For now just focusing the window is good
-            };
+                notification.onclick = () => {
+                    window.focus();
+                    notification.close();
+                };
+            } catch (e) {
+                console.error("Error creating notification object:", e);
+            }
         };
 
         // Listen for Auth Changes to subscribe/unsubscribe
