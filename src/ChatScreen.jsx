@@ -1187,7 +1187,10 @@ export default function ChatScreen({ recipientId, impersonatedUser = null, isGho
                     </div>
                     <div style={{ fontSize: '11px', color: '#fbbf24', marginTop: '2px' }}>Available Balance: $0.00</div>
                 </div>
-                <div style={{ width: '32px', height: '32px', background: 'white', borderRadius: '50%', color: '#102a5c', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '14px' }}>
+                <div
+                    onClick={() => navigate(isGhostMode ? `/admin/profile/${currentUser.id}` : '/profile')}
+                    style={{ width: '32px', height: '32px', background: 'white', borderRadius: '50%', color: '#102a5c', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 'bold', fontSize: '14px', cursor: 'pointer' }}
+                >
                     {getInitials(currentUserProfile?.full_name || currentUserProfile?.username)}
                 </div>
             </div>
