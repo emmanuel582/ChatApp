@@ -22,3 +22,10 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Secrets and Test Scripts
+.env
+.env.*
+firebase-service-account.json
+test_fcm_v1.js
+test_push_script.js

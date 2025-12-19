@@ -63,6 +63,7 @@ serve(async (req) => {
     if (!fcmToken) return;
 
     try {
+        const chatUrl = `/dashboard?chat=${record.sender_id}`;
         const res = await fetch(`https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`, {
             method: 'POST',
             headers: {
@@ -78,11 +79,12 @@ serve(async (req) => {
                     },
                     webpush: {
                         fcm_options: {
-                            link: '/'
+                            link: chatUrl
                         }
                     },
                     data: {
-                        url: '/'
+                        url: chatUrl,
+                        sender_id: record.sender_id
                     }
                 }
             })

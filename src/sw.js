@@ -24,11 +24,38 @@ const messaging = getMessaging(app);
 
 onBackgroundMessage(messaging, (payload) => {
     console.log('[firebase-messaging-sw.js] Received background message ', payload);
-    const notificationTitle = payload.notification.title;
+    const notificationTitle = payload.notification?.title || 'New Message';
     const notificationOptions = {
-        body: payload.notification.body,
-        icon: '/pwa-192x192.png'
+        body: payload.notification?.body || 'You have a new message',
+        icon: '/pwa-192x192.png',
+        data: {
+            url: payload.data?.url || '/'
+        }
     };
 
     self.registration.showNotification(notificationTitle, notificationOptions);
+});
+
+// Handle Notification Click
+self.addEventListener('notificationclick', (event) => {
+    console.log('[sw.js] Notification click Received.', event);
+    event.notification.close();
+
+    const targetUrl = event.notification.data?.url || '/';
+
+    event.waitUntil(
+        self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then((clientList) => {
+            // If already open, focus it and navigate
+            for (const client of clientList) {
+                if ('focus' in client && 'navigate' in client) {
+                    client.focus();
+                    return client.navigate(targetUrl);
+                }
+            }
+            // Otherwise open new
+            if (self.clients.openWindow) {
+                return self.clients.openWindow(targetUrl);
+            }
+        })
+    );
 });
