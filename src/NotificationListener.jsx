@@ -154,49 +154,61 @@ export default function NotificationListener() {
             // 1. Subscribe to Realtime (In-App)
             subscribe(user);
 
-            // 2. Register SW & Subscribe to Push (Background)
-            console.log("Attempting to Initialize Push...");
-            if ('serviceWorker' in navigator && 'PushManager' in window) {
+            // 2. Firebase Cloud Messaging (FCM) Registration
+            console.log("Initializing Firebase Messaging...");
+            if ('serviceWorker' in navigator) {
                 try {
-                    // Check local storage to avoid spamming subscribe on every refresh
-                    const isPushSubscribed = localStorage.getItem('push_subscribed_user') === user.id;
-                    if (isPushSubscribed) return;
+                    const { messaging, getToken, onMessage, VAPID_KEY } = await import('./firebaseClient');
 
-                    const registration = await Promise.race([
-                        navigator.serviceWorker.ready,
-                        new Promise((_, reject) => setTimeout(() => reject(new Error("Service Worker Ready Timed Out")), 5000))
-                    ]);
-                    console.log("Service Worker Ready:", registration);
+                    // Register Service Worker first (VitePWA handles this, but we need the registration object)
+                    const registration = await navigator.serviceWorker.ready;
 
-                    const subscription = await registration.pushManager.subscribe({
-                        userVisibleOnly: true,
-                        applicationServerKey: 'BBZYM5uX9RvLdWH0ATTNjLVlV2Rs7tEuYWpCp-wcbyVFFDqz26hhfGytGaxH5ZqA48eIYOLWvoEaEhyFkEIkHH0'
+                    // Get FCM Token
+                    const currentToken = await getToken(messaging, {
+                        vapidKey: VAPID_KEY,
+                        serviceWorkerRegistration: registration
                     });
 
-                    console.log("Got Push Subscription:", subscription);
+                    if (currentToken) {
+                        console.log("FCM Token Received:", currentToken);
 
-                    // Save to Supabase
-                    const { error } = await supabase
-                        .from('push_subscriptions')
-                        .insert({
-                            user_id: user.id,
-                            subscription: subscription
-                        });
+                        // Save Token to Supabase
+                        // Schema: { endpoint: currentToken } to mimic old structure or just simple wrapping
+                        const subscriptionPayload = {
+                            endpoint: currentToken,
+                            type: 'fcm'
+                        };
 
-                    if (!error) {
-                        console.log('Push Subscription Saved to Database ✅');
-                        localStorage.setItem('push_subscribed_user', user.id);
+                        const { error } = await supabase
+                            .from('push_subscriptions')
+                            .insert({
+                                user_id: user.id,
+                                subscription: subscriptionPayload
+                            });
+
+                        if (!error) {
+                            console.log("FCM Token saved to DB ✅");
+                        } else {
+                            if (error.code !== '23505') console.error("Error saving FCM Token:", error);
+                        }
                     } else {
-                        // Ignore duplicate key error, otherwise log
-                        if (error.code !== '23505') console.error('Push Save Error ❌:', error);
-                        else console.log('Push Subscription already exists in DB');
+                        console.log('No registration token available. Request permission to generate one.');
                     }
 
+                    // Handle Foreground Messages
+                    onMessage(messaging, (payload) => {
+                        console.log('Message received via FCM (Foreground): ', payload);
+                        // Show notification manually since we are in foreground
+                        const { title, body } = payload.notification || {};
+                        new Notification(title || "New Message", {
+                            body: body,
+                            icon: '/pwa-192x192.png'
+                        });
+                    });
+
                 } catch (err) {
-                    console.error('Push Registration Error ❌:', err);
+                    console.error('An error occurred while retrieving token or registering FCM:', err);
                 }
-            } else {
-                console.log("Service Worker or Push Manager not supported");
             }
         };
 
